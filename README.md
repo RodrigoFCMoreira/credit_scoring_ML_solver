@@ -1,0 +1,1 @@
+1 - Criar uma venv com a versão

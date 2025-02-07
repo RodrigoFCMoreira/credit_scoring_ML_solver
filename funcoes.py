@@ -1,3 +1,4 @@
+from sklearn.metrics import roc_curve, auc
 from typing import Dict
 from typing import Tuple, List
 from pycaret.classification import setup, create_model
@@ -15,6 +16,9 @@ from pycaret.classification import *
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_curve, precision_recall_curve, auc
 from typing import Dict, Tuple
+from typing import List, Literal
+from pycaret.classification import ClassificationExperiment
+from collections import Counter
 
 
 def perfil_base(base_modelo: pd.DataFrame, id_col: str, target_col: str, safra_col: str) -> dict:
@@ -133,6 +137,8 @@ def plot_safra_bad_rate(df: pd.DataFrame, safra_col: str = "safra", inadimplente
     plt.title("Total de IDs por Safra e Bad Rate")
     fig.tight_layout()
     plt.show()
+
+    df[safra_col] = df[safra_col].astype('int64')
 
     return safra_stats
 
@@ -336,131 +342,76 @@ def aplicar_imputacao_teste(df: pd.DataFrame,
     return df
 
 
-def selecionar_variaveis_lightgbm_var_aleatoria(
-    df: pd.DataFrame,
+def selecao_variaveis(
+    data: pd.DataFrame,
     target: str,
-    id_column: str,
-    ignore_features: List[str],
-    percentual_corte: float = 0.05,
-    random_var: bool = False,
-    session_id: int = 123
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    methods: List[Literal['classic', 'univariate', 'sequential']],
+    selection_rule: Literal['intersection', 'union', 'voting'] = 'intersection'
+) -> List[str]:
     """
-    Seleciona as variáveis mais importantes utilizando um modelo LightGBM.
+    Realiza a seleção de variáveis no PyCaret usando diferentes métodos e regras de combinação.
 
     Parâmetros:
-    -----------
-    df : pd.DataFrame
-        DataFrame de entrada contendo as variáveis independentes e a variável alvo.
+    - data (pd.DataFrame): Dataset contendo as variáveis preditoras e a variável alvo.
+    - target (str): Nome da variável alvo.
+    - methods (List[str]): Lista com os métodos de seleção a serem aplicados. Opções:
+        - 'classic' (RFE - Recursive Feature Elimination)
+        - 'univariate' (Testes estatísticos ANOVA/qui-quadrado)
+        - 'sequential' (Sequential Feature Selection - SFS)
+    - selection_rule (str): Método de combinação das variáveis selecionadas. Opções:
+        - 'intersection': Mantém apenas as variáveis escolhidas por todos os métodos.
+        - 'union': Mantém todas as variáveis selecionadas por pelo menos um método.
+        - 'voting': Mantém variáveis selecionadas por pelo menos 2 dos métodos escolhidos.
 
-    target : str
-        Nome da variável alvo (coluna de interesse para predição).
-
-    id_column : str
-        Nome da coluna identificadora única de cada amostra.
-
-    ignore_features : List[str]
-        Lista de colunas a serem ignoradas na modelagem.
-
-    percentual_corte : float, opcional (default=0.05)
-        Percentual do valor da maior importância para definir o limiar de corte.
-        útil quando random_var=False, utilizamos quando queremos selecioanr variáveis apenas por importância relativa
-
-    random_var: bool = True,
-        Insere uma variável aleatória e descarta variáveis que possuem importância menor ou igual a ela.
-        Se uma variável aleatória for mais importante que uma variável explicativa, não podemos confiar na variável.
-
-    session_id : int, opcional (default=123)
-        ID de sessão para garantir reprodutibilidade na configuração do PyCaret.
-
-    Retorna:
-    --------
-    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        - DataFrame original com apenas as variáveis selecionadas.
-        - DataFrame contendo as variáveis mantidas e suas importâncias.
-        - DataFrame contendo as variáveis descartadas e suas importâncias.
+    Retorno:
+    - List[str]: Lista final de variáveis selecionadas.
     """
 
-    # inserindo uma variável aleatória entre [0,1)
-    if random_var:
-        df['random_var'] = np.random.rand(df.shape[0])
+    """
+    Observações relevantes sobre o uso:
+    Bases Pequenas/Médias (até 1000 variáveis) → classic ou sequential
+    Se precisar de um modelo bem ajustado → sequential.
+    Se quiser um método robusto baseado no impacto real das variáveis → classic.
 
-    # Configurando o PyCaret para classificação
-    s = setup(df,
-              index=id_column,
-              ignore_features=ignore_features,
-              target=target,
-              session_id=session_id,
-              verbose=False)
+    Bases Grandes (acima de 5000 variáveis) → univariate
+    Se a base é muito grande, o univariate é mais rápido e ajuda a filtrar variáveis antes de rodar modelos mais pesados.
+    Depois, pode usar classic ou sequential só nas melhores variáveis.
+    
+    """
 
-    # Criando e treinando o modelo LightGBM
-    light_gbm = create_model('lightgbm',
-                             fold=5,
-                             # Número máximo de folhas em cada árvore. Controla a complexidade do modelo.
-                             num_leaves=31,
-                             # Profundidade máxima de cada árvore. Um valor menor ajuda a evitar overfitting.
-                             max_depth=6,
-                             # Número total de árvores no modelo. Valores maiores aumentam a precisão, mas também o tempo de treino.
-                             n_estimators=500,
-                             # Taxa de aprendizado. Valores menores tornam o modelo mais estável, mas exigem mais estimadores.
-                             learning_rate=0.05,
-                             # Fração dos dados usada para treinar cada árvore. Evita overfitting e melhora a generalização.
-                             subsample=0.8,
-                             # Proporção de features usadas em cada árvore. Valores menores reduzem overfitting.
-                             colsample_bytree=0.8,
-                             # Número mínimo de amostras necessárias para dividir um nó. Evita divisões muito pequenas e overfitting.
-                             min_child_samples=20,
-                             # Regularização L2 (Ridge). Ajuda a controlar overfitting aumentando a penalização de pesos elevados.
-                             reg_lambda=1,
-                             # Regularização L1 (Lasso). Zera coeficientes de features menos importantes para melhorar a interpretabilidade.
-                             reg_alpha=0.1,
-                             verbose=False)
+    # Verifica se os métodos fornecidos são válidos
+    valid_methods = {'classic', 'univariate', 'sequential'}
+    if not set(methods).issubset(valid_methods):
+        raise ValueError(
+            f"Os métodos devem estar entre {valid_methods}, mas recebeu {methods}")
 
-    # Criando um DataFrame com a importância das features
-    feature_importance = pd.DataFrame({
-        'Nome_Variavel': df.drop(columns=[target, id_column] + ignore_features).columns,
-        'Importancia_Variavel': light_gbm.feature_importances_
-    })
+    selected_features_sets = []
 
-    # Ordenando da maior para a menor importância
-    feature_importance = feature_importance.sort_values(
-        by='Importancia_Variavel', ascending=False)
+    for method in methods:
+        exp = ClassificationExperiment()  # Inicializa o experimento
+        exp.setup(data, target=target, feature_selection=True,
+                  feature_selection_method=method, verbose=False)
 
-    # Encontrando a maior importância e definindo o limiar de corte
-    max_importancia = feature_importance['Importancia_Variavel'].max()
-    limiar_importancia = max_importancia * percentual_corte
+        # Pegamos as features selecionadas via get_config
+        selected_features = exp.get_config("X_train").columns.to_list()
+        selected_features_sets.append(set(selected_features))
 
-    # valor limite da variável randômica
-    if random_var:
-        valor_limite_var_random = feature_importance.loc[feature_importance["Nome_Variavel"]
-                                                         == "random_var", "Importancia_Variavel"].values[0]
-
-    # Separando variáveis mantidas e descartadas com base no limiar
-
-    if random_var:
-        variaveis_mantidas = feature_importance[feature_importance['Importancia_Variavel']
-                                                > valor_limite_var_random]
-        variaveis_descartadas = feature_importance[feature_importance['Importancia_Variavel']
-                                                   <= valor_limite_var_random]
-
+    # Combinação das seleções
+    if selection_rule == 'intersection':
+        variaveis_selecionadas = list(
+            set.intersection(*selected_features_sets))
+    elif selection_rule == 'union':
+        variaveis_selecionadas = list(set.union(*selected_features_sets))
+    elif selection_rule == 'voting':
+        feature_counts = Counter(
+            [feat for features in selected_features_sets for feat in features])
+        variaveis_selecionadas = [feat for feat,
+                                  count in feature_counts.items() if count >= 2]
     else:
-        variaveis_mantidas = feature_importance[feature_importance['Importancia_Variavel']
-                                                >= limiar_importancia]
-        variaveis_descartadas = feature_importance[feature_importance['Importancia_Variavel']
-                                                   < limiar_importancia]
+        raise ValueError(
+            "selection_rule deve ser 'intersection', 'union' ou 'voting'")
 
-    # Criando um novo DataFrame apenas com as variáveis mantidas
-    colunas_mantidas = [id_column, target] + ignore_features + \
-        variaveis_mantidas['Nome_Variavel'].tolist()
-    df_selecionado = df[colunas_mantidas]
-
-    # Exibir variáveis descartadas
-    if random_var:
-        print("\n❌ Importância da variável aleatória:\n", valor_limite_var_random)
-
-    print("\n❌ Variáveis Descartadas:\n", variaveis_descartadas)
-
-    return df_selecionado, variaveis_mantidas, variaveis_descartadas
+    return variaveis_selecionadas
 
 
 def resumo_estatistico(df: pd.DataFrame) -> None:
@@ -693,8 +644,6 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
     test_lr_scored = predict_model(
         tuned_lr, data=test, probability_threshold=0.5, raw_score=True)
 
-    a = train_lightgbm_scored.copy()
-
     print("base escorada pycaret")
     print(train_lightgbm_scored)
     print(train_lightgbm_scored.columns)
@@ -720,7 +669,7 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
     test_regressao_escorado["score_0"] = 1 - test_regressao_escorado["score_1"]
 
     # Retornando os resultados
-    return a, train, test, tuned_lightgbm, tuned_lr, train_lightgbm_escorado, test_lightgbm_escorado, train_regressao_escorado, test_regressao_escorado
+    return train, test, tuned_lightgbm, tuned_lr, train_lightgbm_escorado, test_lightgbm_escorado, train_regressao_escorado, test_regressao_escorado
 
 
 ############################################ FUNCOES DE METRICAS E AVALIACAO DE MODELOS ############################################
@@ -730,19 +679,23 @@ def plot_comparacao_roc(
     train_lightgbm: pd.DataFrame,
     test_lightgbm: pd.DataFrame,
     train_regressao: pd.DataFrame,
-    test_regressao: pd.DataFrame
+    test_regressao: pd.DataFrame,
+    test_oot_lightgbm: pd.DataFrame = None,
+    test_oot_regressao: pd.DataFrame = None
 ) -> None:
     """
     Gera dois gráficos de curva ROC lado a lado para comparar os modelos LightGBM e Regressão Logística.
 
-    O primeiro gráfico contém as curvas ROC do modelo LightGBM para treino e teste.
-    O segundo gráfico contém as curvas ROC do modelo de Regressão Logística para treino e teste.
+    O primeiro gráfico contém as curvas ROC do modelo LightGBM para treino, teste e opcionalmente OOT.
+    O segundo gráfico contém as curvas ROC do modelo de Regressão Logística para treino, teste e opcionalmente OOT.
 
     Parâmetros:
     - train_lightgbm (pd.DataFrame): DataFrame com os dados de treino para o modelo LightGBM.
     - test_lightgbm (pd.DataFrame): DataFrame com os dados de teste para o modelo LightGBM.
     - train_regressao (pd.DataFrame): DataFrame com os dados de treino para o modelo de Regressão Logística.
     - test_regressao (pd.DataFrame): DataFrame com os dados de teste para o modelo de Regressão Logística.
+    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo LightGBM.
+    - test_oot_regressao (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo de Regressão Logística.
 
     Retorno:
     - None. A função exibe os gráficos.
@@ -753,12 +706,14 @@ def plot_comparacao_roc(
 
     # Lista de dados para iteração
     modelos = [
-        ("LightGBM", train_lightgbm, test_lightgbm, axes[0]),
-        ("Regressão Logística", train_regressao, test_regressao, axes[1])
+        ("LightGBM", train_lightgbm, test_lightgbm,
+         test_oot_lightgbm, axes[0]),
+        ("Regressão Logística", train_regressao,
+         test_regressao, test_oot_regressao, axes[1])
     ]
 
-    for nome_modelo, train_df, test_df, ax in modelos:
-        # GARANTIR que estamos usando score_1 (probabilidade da classe positiva)
+    for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
+        # Garantir que estamos usando score_1 (probabilidade da classe positiva)
         y_train, y_test = train_df["y"], test_df["y"]
         scores_train, scores_test = train_df["score_1"], test_df["score_1"]
 
@@ -770,11 +725,20 @@ def plot_comparacao_roc(
         fpr_test, tpr_test, _ = roc_curve(y_test, scores_test)
         auc_test = auc(fpr_test, tpr_test)
 
-        # Plotar curvas
+        # Plotar curvas para treino e teste
         ax.plot(fpr_train, tpr_train,
                 label=f'Treino (AUC = {auc_train:.2f})', color='blue')
         ax.plot(fpr_test, tpr_test,
                 label=f'Teste (AUC = {auc_test:.2f})', color='red')
+
+        # Se houver dados OOT, calcular e plotar
+        if test_oot_df is not None:
+            y_oot = test_oot_df["y"]
+            scores_oot = test_oot_df["score_1"]
+            fpr_oot, tpr_oot, _ = roc_curve(y_oot, scores_oot)
+            auc_oot = auc(fpr_oot, tpr_oot)
+            ax.plot(fpr_oot, tpr_oot,
+                    label=f'OOT (AUC = {auc_oot:.2f})', color='green')
 
         # Linha diagonal de referência
         ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
@@ -817,10 +781,10 @@ def plot_comparacao_prc(
     - None. A função exibe os gráficos.
     """
 
-    # Criar figura com dois subgráficos
+    # Criar uma figura com dois gráficos lado a lado
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Lista de dados para iteração
+    # Lista com os modelos para iterar
     modelos = [
         ("LightGBM", train_lightgbm, test_lightgbm,
          test_oot_lightgbm, axes[0]),
@@ -829,7 +793,7 @@ def plot_comparacao_prc(
     ]
 
     for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
-        # Usar 'score_1' como probabilidade da classe positiva
+        # Definir variáveis de resposta e pontuações preditivas
         y_train, y_test = train_df["y"], test_df["y"]
         scores_train, scores_test = train_df["score_1"], test_df["score_1"]
 
@@ -843,7 +807,7 @@ def plot_comparacao_prc(
             y_test, scores_test)
         auc_test = auc(recall_test, precision_test)
 
-        # Plotar curvas para treino e teste
+        # Plotar curva PRC para treino e teste
         ax.plot(recall_train, precision_train,
                 label=f'Treino (AUC = {auc_train:.2f})', color='blue')
         ax.plot(recall_test, precision_test,
@@ -866,6 +830,506 @@ def plot_comparacao_prc(
         ax.legend()
         ax.grid(True)
 
+    # Ajustar layout e exibir gráficos
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_comparacao_ks(
+    train_lightgbm: pd.DataFrame,
+    test_lightgbm: pd.DataFrame,
+    train_regressao: pd.DataFrame,
+    test_regressao: pd.DataFrame,
+    test_oot_lightgbm: pd.DataFrame = None,
+    test_oot_regressao: pd.DataFrame = None
+) -> None:
+    """
+    Gera dois gráficos da Curva KS (Kolmogorov-Smirnov) lado a lado para comparar os modelos LightGBM e Regressão Logística.
+
+    O eixo X representa a probabilidade de mau (score do modelo, variando de 0 a 1).
+    O eixo Y representa a população acumulada para cada classe (mau e bom).
+
+    O primeiro gráfico contém as curvas KS do modelo LightGBM para treino, teste e opcionalmente OOT.
+    O segundo gráfico contém as curvas KS do modelo de Regressão Logística para treino, teste e opcionalmente OOT.
+
+    Parâmetros:
+    - train_lightgbm (pd.DataFrame): DataFrame com os dados de treino para o modelo LightGBM.
+    - test_lightgbm (pd.DataFrame): DataFrame com os dados de teste para o modelo LightGBM.
+    - train_regressao (pd.DataFrame): DataFrame com os dados de treino para o modelo de Regressão Logística.
+    - test_regressao (pd.DataFrame): DataFrame com os dados de teste para o modelo de Regressão Logística.
+    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo LightGBM.
+    - test_oot_regressao (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo de Regressão Logística.
+
+    Retorno:
+    - None. A função exibe os gráficos.
+    """
+
+    def calcular_ks(y_true, scores):
+        """Calcula a curva KS para 'mau' (y=1) e 'bom' (y=0), 
+        mostrando a população acumulada sobre a probabilidade de mau."""
+
+        df = pd.DataFrame({"y": y_true, "score": scores})
+        # Ordenar pela probabilidade de mau (de 0 a 1)
+        df = df.sort_values("score", ascending=True)
+
+        # Criar distribuição cumulativa
+        total_mau = (df["y"] == 1).sum()
+        total_bom = (df["y"] == 0).sum()
+
+        df["cumulativo_mau"] = (df["y"] == 1).cumsum() / total_mau
+        df["cumulativo_bom"] = (df["y"] == 0).cumsum() / total_bom
+
+        return df["score"], df["cumulativo_mau"], df["cumulativo_bom"]
+
+    # Criar figura com dois subgráficos
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Lista de dados para iteração
+    modelos = [
+        ("LightGBM", train_lightgbm, test_lightgbm,
+         test_oot_lightgbm, axes[0]),
+        ("Regressão Logística", train_regressao,
+         test_regressao, test_oot_regressao, axes[1])
+    ]
+
+    for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
+        # Garantir que estamos usando 'score_1' como probabilidade da classe positiva (mau)
+        y_train, y_test = train_df["y"], test_df["y"]
+        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
+
+        # Calcular curva KS para treino e teste
+        prob_train, cum_mau_train, cum_bom_train = calcular_ks(
+            y_train, scores_train)
+        prob_test, cum_mau_test, cum_bom_test = calcular_ks(
+            y_test, scores_test)
+
+        # Plotar curvas para "mau" e "bom" para treino
+        ax.plot(prob_train, cum_mau_train, label=f'Treino - Mau', color='blue')
+        ax.plot(prob_train, cum_bom_train, label=f'Treino - Bom',
+                linestyle='--', color='blue')
+
+        # Plotar curvas para "mau" e "bom" para teste
+        ax.plot(prob_test, cum_mau_test, label=f'Teste - Mau', color='red')
+        ax.plot(prob_test, cum_bom_test, label=f'Teste - Bom',
+                linestyle='--', color='red')
+
+        # Se houver dados OOT, calcular e plotar
+        if test_oot_df is not None:
+            y_oot = test_oot_df["y"]
+            scores_oot = test_oot_df["score_1"]
+            prob_oot, cum_mau_oot, cum_bom_oot = calcular_ks(y_oot, scores_oot)
+            ax.plot(prob_oot, cum_mau_oot, label=f'OOT - Mau', color='green')
+            ax.plot(prob_oot, cum_bom_oot, label=f'OOT - Bom',
+                    linestyle='--', color='green')
+
+        # Configurações do gráfico
+        ax.set_title(f'Curva KS - {nome_modelo}')
+        ax.set_xlabel('Probabilidade de Mau')
+        ax.set_ylabel('Percentual Acumulado da População')
+        ax.legend()
+        ax.grid(True)
+
     # Exibir gráficos
     plt.tight_layout()
+    plt.show()
+
+
+def plot_comparacao_decil(
+    train_lightgbm: pd.DataFrame,
+    test_lightgbm: pd.DataFrame,
+    train_regressao: pd.DataFrame,
+    test_regressao: pd.DataFrame,
+    test_oot_lightgbm: pd.DataFrame = None,
+    test_oot_regressao: pd.DataFrame = None,
+    num_divisoes: int = 10
+) -> None:
+    """
+    Gera gráficos de barras comparativos da distribuição por decis (ou outra divisão escolhida)
+    para os modelos LightGBM e Regressão Logística. Inclui uma linha horizontal indicando a taxa média de maus.
+
+    Parâmetros:
+    - train_lightgbm (pd.DataFrame): DataFrame de treino para o modelo LightGBM.
+    - test_lightgbm (pd.DataFrame): DataFrame de teste para o modelo LightGBM.
+    - train_regressao (pd.DataFrame): DataFrame de treino para o modelo de Regressão Logística.
+    - test_regressao (pd.DataFrame): DataFrame de teste para o modelo de Regressão Logística.
+    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame OOT para LightGBM.
+    - test_oot_regressao (pd.DataFrame, opcional): DataFrame OOT para Regressão Logística.
+    - num_divisoes (int): Número de divisões para os grupos (exemplo: 10 para decis, 5 para quintis etc.).
+
+    Retorno:
+    - None. A função exibe os gráficos de barras.
+    """
+
+    def calcular_decil(y_true, scores, num_divisoes):
+        """Divide os dados em grupos e calcula a taxa de eventos (mau) por grupo."""
+        df = pd.DataFrame({"y": y_true, "score": scores})
+
+        # Criar os grupos (decis, quintis, etc.)
+        df["grupo"] = pd.qcut(df["score"], q=num_divisoes,
+                              labels=False, duplicates="drop")
+
+        # Calcular a taxa de maus por grupo
+        decil_summary = df.groupby("grupo")["y"].mean()
+
+        return decil_summary
+
+    # Criar figura com dois subgráficos
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Lista de dados para iteração
+    modelos = [
+        ("LightGBM", train_lightgbm, test_lightgbm,
+         test_oot_lightgbm, axes[0]),
+        ("Regressão Logística", train_regressao,
+         test_regressao, test_oot_regressao, axes[1])
+    ]
+
+    for nome_modelo, train_df, test_df, oot_df, ax in modelos:
+        # Garantir que estamos usando 'score_1' como probabilidade da classe positiva (mau)
+        y_train, y_test = train_df["y"], test_df["y"]
+        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
+
+        # Calcular distribuição por decis
+        decil_train = calcular_decil(y_train, scores_train, num_divisoes)
+        decil_test = calcular_decil(y_test, scores_test, num_divisoes)
+
+        # Taxa média de maus
+        taxa_mau_train = round(y_train.mean(), 4)
+        taxa_mau_test = round(y_test.mean(), 4)
+
+        # Se houver OOT, calcular também
+        if oot_df is not None:
+            y_oot = oot_df["y"]
+            scores_oot = oot_df["score_1"]
+            decil_oot = calcular_decil(y_oot, scores_oot, num_divisoes)
+            taxa_mau_oot = round(y_oot.mean(), 4)
+        else:
+            decil_oot = None
+            taxa_mau_oot = None
+
+        # Criar gráfico de barras
+        indices = np.arange(len(decil_train))
+        largura = 0.3  # Largura das barras
+
+        ax.bar(indices - largura, decil_train,
+               largura, label="Treino", color="blue")
+        ax.bar(indices, decil_test, largura, label="Teste", color="red")
+
+        if decil_oot is not None:
+            ax.bar(indices + largura, decil_oot,
+                   largura, label="OOT", color="green")
+
+        # Adicionar linha horizontal com a taxa média de maus, com valores na legenda
+        ax.axhline(taxa_mau_train, color="blue", linestyle="--", linewidth=1,
+                   label=f"Média Treino: {taxa_mau_train:.2%}")
+        ax.axhline(taxa_mau_test, color="red", linestyle="--", linewidth=1,
+                   label=f"Média Teste: {taxa_mau_test:.2%}")
+
+        if taxa_mau_oot is not None:
+            ax.axhline(taxa_mau_oot, color="green", linestyle="--", linewidth=1,
+                       label=f"Média OOT: {taxa_mau_oot:.2%}")
+
+        # Configurações do gráfico
+        ax.set_title(f'Distribuição por Grupo - {nome_modelo}')
+        ax.set_xlabel(f'Grupo ({num_divisoes} divisões)')
+        ax.set_ylabel('Taxa de Mau (%)')
+        ax.set_xticks(indices)
+        ax.set_xticklabels(indices + 1)
+        ax.legend()
+        ax.grid(axis="y", linestyle="--", alpha=0.7)
+
+    # Exibir gráficos
+    plt.tight_layout()
+    plt.show()
+
+
+def gerar_tabela_avaliacao(
+    train_lightgbm: pd.DataFrame,
+    test_lightgbm: pd.DataFrame,
+    train_regressao: pd.DataFrame,
+    test_regressao: pd.DataFrame,
+    test_oot_lightgbm: pd.DataFrame = None,
+    test_oot_regressao: pd.DataFrame = None,
+    num_divisoes: int = 10
+) -> pd.DataFrame:
+    """
+    Gera uma tabela única contendo estatísticas sobre quantis de score para diferentes conjuntos de dados.
+
+    Parâmetros:
+    -----------
+    train_lightgbm : pd.DataFrame
+        Conjunto de treino do modelo LightGBM.
+    test_lightgbm : pd.DataFrame
+        Conjunto de teste do modelo LightGBM.
+    train_regressao : pd.DataFrame
+        Conjunto de treino do modelo de regressão.
+    test_regressao : pd.DataFrame
+        Conjunto de teste do modelo de regressão.
+    test_oot_lightgbm : pd.DataFrame, opcional
+        Conjunto de teste OOT (Out-of-Time) para o modelo LightGBM.
+    test_oot_regressao : pd.DataFrame, opcional
+        Conjunto de teste OOT (Out-of-Time) para o modelo de regressão.
+    num_divisoes : int, padrão=10
+        Número de quantis a serem calculados.
+
+    Retorno:
+    --------
+    pd.DataFrame
+        DataFrame contendo estatísticas agregadas por quantil.
+    """
+
+    # Lista de DataFrames para processamento
+    dataframes = {
+        "Train LightGBM": train_lightgbm,
+        "Test LightGBM": test_lightgbm,
+        "Train Regressão": train_regressao,
+        "Test Regressão": test_regressao,
+    }
+
+    # Adiciona os OOT caso existam
+    if test_oot_lightgbm is not None:
+        dataframes["OOT LightGBM"] = test_oot_lightgbm
+    if test_oot_regressao is not None:
+        dataframes["OOT Regressão"] = test_oot_regressao
+
+    # Lista para armazenar os resultados
+    resultados = []
+
+    for nome, df in dataframes.items():
+        # Ordena pelo score_1 para garantir a correta distribuição dos quantis
+        df = df.copy()
+        df["quantil"] = pd.qcut(
+            df["score_1"], num_divisoes, labels=False, duplicates='drop')
+
+        # Ajusta para que os quantis comecem em 1 em vez de 0
+        df["quantil"] += 1
+
+        # Calcula métricas por quantil
+        resumo = df.groupby("quantil").agg(
+            total_casos=("id", "count"),
+            total_mau=("y", "sum")
+        ).reset_index()
+
+        # Adiciona colunas derivadas
+        resumo["total_bom"] = resumo["total_casos"] - resumo["total_mau"]
+        resumo["maus_acumulados"] = resumo["total_mau"].cumsum()
+        resumo["percentual_eventos"] = (
+            resumo["total_mau"] / resumo["total_mau"].sum()) * 100
+        resumo["cumulative_percentual_eventos"] = resumo["maus_acumulados"] / \
+            resumo["total_mau"].sum() * 100
+
+        # Cálculo do Gain
+        resumo["gain"] = resumo["cumulative_percentual_eventos"]
+
+        # Cálculo do Cumulative Lift
+        resumo["cumulative_lift"] = resumo["gain"] / \
+            ((resumo["quantil"] / num_divisoes) * 100)
+
+        # Adiciona o nome do dataframe ao resultado
+        resumo.insert(0, "nome_dataframe", nome)
+
+        # Renomeia a coluna do quantil para melhor interpretação
+        resumo.rename(columns={"quantil": "quantil", "total_casos": "total_casos", "total_mau": "total_mau",
+                               "maus_acumulados": "maus_acumulados", "percentual_eventos": "% maus acumulados",
+                               "gain": "Gain", "cumulative_lift": "Cumulative Lift"}, inplace=True)
+
+        # Adiciona ao conjunto de resultados
+        resultados.append(resumo)
+
+    # Concatena todos os resultados em um único DataFrame
+    resultado_final = pd.concat(resultados, ignore_index=True)
+
+    resultado_final = resultado_final[['nome_dataframe', 'quantil', 'total_casos', 'total_mau', 'total_bom',
+                                       'maus_acumulados', '% maus acumulados']]
+
+    return resultado_final
+
+
+def gerar_tabela_avaliacao(
+    train_lightgbm: pd.DataFrame,
+    test_lightgbm: pd.DataFrame,
+    train_regressao: pd.DataFrame,
+    test_regressao: pd.DataFrame,
+    test_oot_lightgbm: pd.DataFrame = None,
+    test_oot_regressao: pd.DataFrame = None,
+    num_divisoes: int = 10
+) -> pd.DataFrame:
+    """
+    Gera uma tabela única contendo estatísticas sobre quantis de score para diferentes conjuntos de dados.
+
+    Parâmetros:
+    -----------
+    train_lightgbm : pd.DataFrame
+        Conjunto de treino do modelo LightGBM.
+    test_lightgbm : pd.DataFrame
+        Conjunto de teste do modelo LightGBM.
+    train_regressao : pd.DataFrame
+        Conjunto de treino do modelo de regressão.
+    test_regressao : pd.DataFrame
+        Conjunto de teste do modelo de regressão.
+    test_oot_lightgbm : pd.DataFrame, opcional
+        Conjunto de teste OOT (Out-of-Time) para o modelo LightGBM.
+    test_oot_regressao : pd.DataFrame, opcional
+        Conjunto de teste OOT (Out-of-Time) para o modelo de regressão.
+    num_divisoes : int, padrão=10
+        Número de quantis a serem calculados.
+
+    Retorno:
+    --------
+    pd.DataFrame
+        DataFrame contendo estatísticas agregadas por quantil.
+    """
+
+    # Lista de DataFrames para processamento
+    dataframes = {
+        "Train LightGBM": train_lightgbm,
+        "Test LightGBM": test_lightgbm,
+        "Train Regressão": train_regressao,
+        "Test Regressão": test_regressao,
+    }
+
+    # Adiciona os OOT caso existam
+    if test_oot_lightgbm is not None:
+        dataframes["OOT LightGBM"] = test_oot_lightgbm
+    if test_oot_regressao is not None:
+        dataframes["OOT Regressão"] = test_oot_regressao
+
+    # Lista para armazenar os resultados
+    resultados = []
+
+    for nome, df in dataframes.items():
+        # Ordena pelo score_1 para garantir a correta distribuição dos quantis
+        df = df.copy()
+        df["quantil"] = pd.qcut(
+            df["score_1"], num_divisoes, labels=False, duplicates='drop')
+
+        # Ajusta para que os quantis comecem em 1 em vez de 0
+        df["quantil"] += 1
+
+        # Calcula métricas por quantil
+        resumo = df.groupby("quantil").agg(
+            score_0_min=("score_0", "min"),
+            score_0_max=("score_0", "max"),
+            total_casos=("id", "count"),
+            total_mau=("y", "sum")
+        ).reset_index()
+
+        # Adiciona colunas derivadas
+        resumo["total_bom"] = resumo["total_casos"] - resumo["total_mau"]
+        resumo["maus_acumulados"] = resumo["total_mau"].cumsum()
+        resumo["% maus acumulados"] = (
+            resumo["maus_acumulados"] / resumo["total_mau"].sum()) * 100
+
+        # Cálculo do KS por faixa
+        resumo["bons_acumulados"] = resumo["total_bom"].cumsum()
+        resumo["% bons acumulados"] = (
+            resumo["bons_acumulados"] / resumo["total_bom"].sum()) * 100
+        resumo["KS"] = abs(resumo["% maus acumulados"] -
+                           resumo["% bons acumulados"])
+
+        # Adiciona o nome do dataframe ao resultado
+        resumo.insert(0, "nome_dataframe", nome)
+
+        # Renomeia a coluna do quantil para melhor interpretação
+        resumo.rename(columns={"quantil": "quantil", "score_0_min": "score_0 min",
+                      "score_0_max": "score_0 max"}, inplace=True)
+
+        # Seleciona apenas as colunas desejadas
+        resumo = resumo[['nome_dataframe', 'quantil', 'score_0 min', 'score_0 max', 'total_casos', 'total_mau', 'total_bom',
+                         'maus_acumulados', '% maus acumulados', 'KS']]
+
+        # Adiciona ao conjunto de resultados
+        resultados.append(resumo)
+
+    # Concatena todos os resultados em um único DataFrame
+    resultado_final = pd.concat(resultados, ignore_index=True)
+
+    return resultado_final
+
+
+def calcular_ks_por_safra(base_escorada: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula o valor máximo da estatística KS (Kolmogorov-Smirnov) para cada safra em um DataFrame.
+
+    Parâmetros:
+    base_escorada (pd.DataFrame): DataFrame contendo as colunas ['id', 'safra', 'y', 'score_1', 'score_0'].
+
+    Retorna:
+    pd.DataFrame: DataFrame com as colunas ['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'].
+    """
+
+    def calcular_ks(df: pd.DataFrame) -> Tuple[float, float]:
+        """
+        Calcula o KS máximo de um DataFrame contendo colunas:
+        ['id', 'safra', 'y', 'score_1', 'score_0'].
+
+        Retorna o KS máximo (em percentual) e o ponto onde ele ocorre.
+        """
+        df = df.sort_values(
+            by='score_1', ascending=False)  # Ordena pelo score_1 em ordem decrescente
+
+        total_eventos = df['y'].sum()
+        total_nao_eventos = (df['y'] == 0).sum()
+
+        # Evita divisão por zero
+        if total_eventos == 0 or total_nao_eventos == 0:
+            return 0.0, np.nan
+
+        df['acumulado_eventos'] = (df['y'].cumsum()) / total_eventos
+        df['acumulado_nao_eventos'] = (
+            (df['y'] == 0).cumsum()) / total_nao_eventos
+
+        df['diferença'] = abs(df['acumulado_eventos'] -
+                              df['acumulado_nao_eventos'])
+
+        ks_max = df['diferença'].max() * 100  # Convertendo KS para percentual
+        ponto_ks = df.loc[df['diferença'].idxmax(), 'score_1']
+
+        return ks_max, ponto_ks
+
+    resultados = []
+    # Adicionado observed=True para categorizar corretamente
+    for safra, grupo in base_escorada.groupby('safra', observed=True):
+        ks_max, ponto_ks = calcular_ks(grupo)
+        resultados.append([safra, len(grupo), ks_max, ponto_ks])
+
+    tabela_resultados = pd.DataFrame(
+        resultados, columns=['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'])
+
+    # Garantir que a safra seja ordenada corretamente como categoria
+    tabela_resultados['safra'] = pd.Categorical(
+        tabela_resultados['safra'], ordered=True)
+    tabela_resultados = tabela_resultados.sort_values(by='safra')
+
+    return tabela_resultados
+
+
+def plotar_ks_safra(tabela_resultados: pd.DataFrame) -> None:
+    """
+    Gera um gráfico de barras mostrando a volumetria por safra e,
+    no eixo secundário, o valor do KS por safra (em percentual).
+
+    Parâmetros:
+    tabela_resultados (pd.DataFrame): DataFrame com as colunas ['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'].
+    """
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    # Gráfico de barras para volumetria
+    ax1.bar(tabela_resultados['safra'].astype(str), tabela_resultados['contagem_de_linhas'],
+            color='skyblue', label='Volumetria por Safra')
+    ax1.set_xlabel('Safra')
+    ax1.set_ylabel('Contagem de Linhas', color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+
+    # Criar um segundo eixo para o KS
+    ax2 = ax1.twinx()
+    ax2.plot(tabela_resultados['safra'].astype(str), tabela_resultados['ks_max'],
+             color='red', marker='o', label='KS Máximo')
+    ax2.set_ylabel('KS Máximo (%)', color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+    ax2.set_ylim(0, 100)  # Garantindo que o eixo do KS vá de 0 a 100
+
+    # Título e legenda
+    plt.title('Volumetria por Safra e KS Máximo (%)')
+    fig.tight_layout()
     plt.show()
