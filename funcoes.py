@@ -19,6 +19,13 @@ from typing import Dict, Tuple
 from typing import List, Literal
 from pycaret.classification import ClassificationExperiment
 from collections import Counter
+from scipy.stats import ks_2samp
+import pandas as pd
+import numpy as np
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix
+)
 
 
 def perfil_base(base_modelo: pd.DataFrame, id_col: str, target_col: str, safra_col: str) -> dict:
@@ -1333,3 +1340,239 @@ def plotar_ks_safra(tabela_resultados: pd.DataFrame) -> None:
     plt.title('Volumetria por Safra e KS Máximo (%)')
     fig.tight_layout()
     plt.show()
+
+
+def calcular_psi(safra_referencia: pd.Series, safra_atual: pd.Series, bins: int = 10) -> Tuple[float, pd.DataFrame]:
+    """
+    Calcula o Population Stability Index (PSI) para uma variável contínua.
+
+    Parâmetros:
+    - safra_referencia (pd.Series): Série de valores da safra de referência.
+    - safra_atual (pd.Series): Série de valores da safra atual.
+    - bins (int): Número de faixas para discretizar os dados (padrão=10).
+
+    Retorna:
+    - Tuple[float, pd.DataFrame]: PSI total e um DataFrame com os detalhes por bin.
+    """
+
+    # Criar bins baseados na safra de referência
+    bins_edges = np.linspace(safra_referencia.min(),
+                             safra_referencia.max(), bins + 1)
+
+    # Contar os valores dentro de cada bin
+    ref_counts, _ = np.histogram(safra_referencia, bins=bins_edges)
+    atual_counts, _ = np.histogram(safra_atual, bins=bins_edges)
+
+    # Converter para proporções
+    ref_props = ref_counts / ref_counts.sum()
+    atual_props = atual_counts / atual_counts.sum()
+
+    # Evitar divisão por zero (substituir 0 por um valor mínimo)
+    ref_props = np.where(ref_props == 0, 0.0001, ref_props)
+    atual_props = np.where(atual_props == 0, 0.0001, atual_props)
+
+    # Calcular PSI para cada bin
+    psi_values = (ref_props - atual_props) * np.log(ref_props / atual_props)
+
+    # PSI total
+    psi_total = psi_values.sum()
+
+    # Criar DataFrame com os resultados
+    psi_df = pd.DataFrame({
+        'Bin': [f'{round(bins_edges[i], 2)} - {round(bins_edges[i+1], 2)}' for i in range(bins)],
+        'Ref_Proporção': ref_props,
+        'Atual_Proporção': atual_props,
+        'PSI_Bin': psi_values
+    })
+
+    return psi_total, psi_df
+
+
+def monitorar_variaveis_continuas(
+    safra_referencia: pd.DataFrame, safra_atual: pd.DataFrame, colunas_numericas: List[str],
+    psi_threshold: float = 0.1, ks_threshold: float = 0.05
+) -> Dict[str, Dict[str, float]]:
+    """
+    Monitora a estabilidade das variáveis contínuas entre duas safras usando PSI e KS Test.
+
+    Parâmetros:
+    - safra_referencia (pd.DataFrame): DataFrame com os dados da safra de referência.
+    - safra_atual (pd.DataFrame): DataFrame com os dados da safra atual.
+    - colunas_numericas (List[str]): Lista de colunas numéricas a serem monitoradas.
+    - psi_threshold (float): Limiar para considerar PSI significativo (padrão=0.1).
+    - ks_threshold (float): Limiar para considerar KS Test significativo (padrão=0.05).
+
+    Retorna:
+    - Dict[str, Dict[str, float]]: Dicionário com variáveis que tiveram mudanças significativas.
+    """
+
+    alertas = {'psi': {}, 'ks': {}}
+
+    for col in colunas_numericas:
+        # Calcular PSI
+        psi_total, _ = calcular_psi(safra_referencia[col], safra_atual[col])
+
+        # Aplicar KS Test
+        stat, p_value = ks_2samp(
+            safra_referencia[col].dropna(), safra_atual[col].dropna())
+
+        # Verificar se o PSI indica mudança significativa
+        if psi_total >= psi_threshold:
+            alertas['psi'][col] = {
+                'PSI': psi_total,
+                'Alerta': 'Mudança Moderada' if 0.1 <= psi_total < 0.25 else 'Mudança Significativa'
+            }
+
+        # Verificar se o KS Test indica mudança significativa
+        if p_value < ks_threshold:
+            alertas['ks'][col] = {
+                'KS_Stat': stat,
+                'p_value': p_value,
+                'Alerta': 'Mudança Significativa'
+            }
+
+    psi = pd.DataFrame.from_dict(alertas['psi'], orient='index')
+
+    ks = pd.DataFrame.from_dict(alertas['ks'], orient='index')
+
+    return psi, ks
+
+
+def obter_importancia_variaveis(modelo, nome_modelo=""):
+    """
+    Obtém a importância das variáveis de um modelo PyCaret.
+
+    Parâmetros:
+    modelo: Modelo treinado pelo PyCaret.
+    nome_modelo: Nome do modelo (opcional, apenas para identificação).
+
+    Retorna:
+    DataFrame com as colunas 'nome_variavel' e 'importancia', ordenado do maior para o menor.
+    """
+    if hasattr(modelo, 'feature_importances_'):  # LightGBM e outros modelos baseados em árvores
+        importancia = modelo.feature_importances_
+        variaveis = modelo.feature_name_ if hasattr(
+            modelo, 'feature_name_') else range(len(importancia))
+
+    elif hasattr(modelo, 'coef_'):  # Modelos lineares como regressão logística
+        importancia = modelo.coef_.ravel()  # Mantendo os valores originais dos betas
+        variaveis = modelo.feature_names_in_ if hasattr(
+            modelo, 'feature_names_in_') else range(len(importancia))
+
+        # Criar DataFrame e ordenar pelo valor absoluto dos coeficientes, mas mantendo os sinais originais
+        df_importancia = pd.DataFrame(
+            {'nome_variavel': variaveis, 'importancia': importancia})
+        df_importancia['importancia_abs'] = df_importancia['importancia'].abs()
+        df_importancia = df_importancia.sort_values(by="importancia_abs", ascending=False).drop(
+            columns=['importancia_abs']).reset_index(drop=True)
+
+        return df_importancia
+
+    else:
+        raise ValueError(
+            f"O modelo {nome_modelo} não possui um método de importância de variáveis.")
+
+    df_importancia = pd.DataFrame(
+        {'nome_variavel': variaveis, 'importancia': importancia})
+    df_importancia = df_importancia.sort_values(
+        by="importancia", ascending=False).reset_index(drop=True)
+
+    return df_importancia
+
+
+def calcular_metricas_multiplas(bases_escoradas: Dict[str, pd.DataFrame], limiar: float = 0.5) -> pd.DataFrame:
+    """
+    Calcula métricas de avaliação para um dicionário de DataFrames contendo bases escoradas.
+
+    Parâmetros:
+    -----------
+    bases_escoradas : dict[str, pd.DataFrame]
+        Dicionário onde:
+        - As chaves são os nomes das bases.
+        - Os valores são DataFrames com as colunas:
+            - 'id': Identificador único.
+            - 'safra': Período de referência.
+            - 'y': Variável alvo (0 ou 1).
+            - 'score_1': Probabilidade prevista da classe positiva.
+            - 'score_0': Probabilidade prevista da classe negativa.
+
+    limiar : float, opcional (default=0.5)
+        Valor de corte para classificar as previsões. Valores acima do limiar são considerados positivos.
+
+    Retorna:
+    --------
+    pd.DataFrame:
+        DataFrame contendo as métricas para cada base no dicionário:
+        - Nome da Base
+        - Acurácia
+        - Precisão
+        - Recall
+        - F1-score
+        - AUC (Área sob a curva ROC)
+        - KS MAX (Kolmogorov-Smirnov)
+        - GINI
+        - Verdadeiros Positivos (TP)
+        - Falsos Positivos (FP)
+        - Verdadeiros Negativos (TN)
+        - Falsos Negativos (FN)
+    """
+
+    # Lista para armazenar os resultados
+    resultados = []
+
+    # Percorre cada DataFrame no dicionário
+    for nome_base, base_escorada in bases_escoradas.items():
+        # Verifica se o elemento é realmente um DataFrame
+        if not isinstance(base_escorada, pd.DataFrame):
+            raise TypeError(
+                f"O valor associado a '{nome_base}' não é um DataFrame. Recebido: {type(base_escorada)}")
+
+        # Verifica se as colunas necessárias estão presentes
+        colunas_necessarias = {'id', 'safra', 'y', 'score_1', 'score_0'}
+        if not colunas_necessarias.issubset(base_escorada.columns):
+            raise ValueError(
+                f"O DataFrame '{nome_base}' deve conter as colunas {colunas_necessarias}")
+
+        # Obtendo os valores reais (y) e as previsões baseadas no limiar
+        y_true = base_escorada['y']
+        y_pred = (base_escorada['score_1'] >= limiar).astype(int)
+        # Probabilidades da classe positiva
+        y_scores = base_escorada['score_1']
+
+        # Calculando métricas básicas
+        acuracia = accuracy_score(y_true, y_pred)
+        precisao = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+
+        # Matriz de confusão
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+
+        # Cálculo do AUC (Área sob a curva ROC)
+        auc = roc_auc_score(y_true, y_scores)
+
+        # KS MAX (Kolmogorov-Smirnov)
+        ks_stat = ks_2samp(y_scores[y_true == 1],
+                           y_scores[y_true == 0]).statistic
+
+        # GINI = 2 * AUC - 1
+        gini = 2 * auc - 1
+
+        # Adiciona os resultados na lista
+        resultados.append({
+            "Nome da Base": nome_base,
+            "Acurácia": round(acuracia, 4),
+            "Precisão": round(precisao, 4),
+            "Recall": round(recall, 4),
+            "F1-score": round(f1, 4),
+            "AUC": round(auc, 4),
+            "KS MAX": round(ks_stat, 4),
+            "GINI": round(gini, 4),
+            "TP": tp,
+            "FP": fp,
+            "TN": tn,
+            "FN": fn
+        })
+
+    # Converte a lista de resultados para um DataFrame e retorna
+    return pd.DataFrame(resultados)
