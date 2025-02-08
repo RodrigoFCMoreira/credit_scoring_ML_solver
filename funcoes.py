@@ -28,6 +28,7 @@ from sklearn.metrics import (
 )
 from optbinning import OptimalBinning
 from sklearn.cluster import KMeans
+from pycaret.classification import load_model, predict_model
 
 
 def perfil_base(base_modelo: pd.DataFrame, id_col: str, target_col: str, safra_col: str) -> dict:
@@ -1735,3 +1736,52 @@ def train_woe_binning(
             plt.show()
 
     return df_result, binning_rules
+
+
+def escorar_modelo(base_treino: pd.DataFrame, base_dados_escorar: pd.DataFrame, caminho_modelo: str) -> pd.DataFrame:
+    """
+    Carrega um modelo salvo no PyCaret, faz previsões na base de dados fornecida e retorna os resultados.
+
+    Parâmetros:
+    -----------
+    base_dados : pd.DataFrame
+        Base de dados contendo as variáveis preditoras.
+
+    caminho_modelo : str
+        Caminho do arquivo do modelo salvo pelo PyCaret (.pkl).
+
+    Retorno:
+    --------
+    pd.DataFrame
+        DataFrame original com uma nova coluna contendo as previsões do modelo.
+    """
+
+    # Imputando missing
+    regra_imputacao = escolher_estrategia_imputacao(base_treino)
+    base_treino, regra_imputacao, dict_mediana, dict_media = aplicar_imputacao_treino(
+        base_treino, regra_imputacao)
+    base_dados_escorar = aplicar_imputacao_teste(
+        base_dados_escorar, regra_imputacao, dict_mediana, dict_media)
+
+    # 1. Carregar o modelo treinado e salvo anteriormente
+    modelo = load_model(caminho_modelo)
+    print(f"Modelo '{caminho_modelo}' carregado com sucesso!")
+
+    # 2. Verificar se a base contém todas as colunas que o modelo espera
+    colunas_modelo = modelo.feature_names_in_
+    colunas_faltantes = [
+        col for col in colunas_modelo if col not in base_dados_escorar.columns]
+
+    if colunas_faltantes:
+        raise ValueError(
+            f"A base de dados fornecida não contém as colunas necessárias: {colunas_faltantes}")
+
+    # 3. Fazer a predição na base de dados
+    resultado = predict_model(
+        modelo, data=base_dados_escorar, probability_threshold=0.3, raw_score=True)
+
+    resultado = resultado[['id', 'safra', 'y', 'prediction_score_0', 'prediction_score_1']].rename(
+        columns={'prediction_score_0': 'score_0', 'prediction_score_1': 'score_1'})
+
+    # 4. Retornar a base original com a nova coluna de previsão
+    return resultado
