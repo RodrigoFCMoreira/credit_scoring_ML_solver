@@ -26,6 +26,8 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, confusion_matrix
 )
+from optbinning import OptimalBinning
+from sklearn.cluster import KMeans
 
 
 def perfil_base(base_modelo: pd.DataFrame, id_col: str, target_col: str, safra_col: str) -> dict:
@@ -536,7 +538,7 @@ def grafico_variaveis_categoricas(df: pd.DataFrame) -> None:
 ################################# MODELAGEM - TREINAMENTO E ESCORAGEM ####################################################################
 
 
-def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, safra_col: str, target_col: str) -> tuple[
+def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, safra_col: str, target_col: str, lista_vars_numericas_categorizar: List[str]) -> tuple[
     pd.DataFrame, pd.DataFrame, Any, Any, Any, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame
 ]:
     """
@@ -569,8 +571,13 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
 
         # SMOTE (mesmo sendo 30% de 1 e 70% de 0 vamos testar)
         # Balanceamento de classes (caso haja desbalanceamento)
-        fix_imbalance=True,
-        fix_imbalance_method='SMOTE',
+        # fix_imbalance=True,
+        # fix_imbalance_method='SMOTE',
+        numeric_imputation="median",
+        categorical_imputation="most_frequent",
+
+        # 🔸 Discretizando (binning) variáveis numéricas para reduzir oscilações extremas
+        bin_numeric_features=lista_vars_numericas_categorizar,  # Agrupar em faixas
 
         # vamos avaliar o modelo por meio da escoragem oos e oot, então não precisamos de um novo conjunto de testes.
         train_size=0.9,
@@ -592,7 +599,9 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
 
         normalize=True,
         normalize_method='zscore',  # (valor - media)/desvio_padrao
-        feature_selection=False  # já fizemos esse passo anteriormente
+        feature_selection=False,  # já fizemos esse passo anteriormente
+
+
     )
 
     # Modelos a serem comparados
@@ -608,7 +617,7 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
         custom_grid={
 
             # ajusta a influência das classes automaticamente. (testando)
-            # 'class_weight': ['balanced'],
+            'class_weight': ['balanced'],
 
             # Número máximo de folhas em cada árvore (define a complexidade dos splits)
             # Valores maiores permitem capturar interações mais complexas, mas aumentam o risco de overfitting.
@@ -926,26 +935,27 @@ def plot_comparacao_ks(
     """
 
     def calcular_ks(y_true, scores):
-        """Calcula a curva KS para 'mau' (y=1) e 'bom' (y=0), 
+        """Calcula a curva KS para 'mau' (y=1) e 'bom' (y=0),
         mostrando a população acumulada sobre a probabilidade de mau."""
 
         df = pd.DataFrame({"y": y_true, "score": scores})
-        # Ordenar pela probabilidade de mau (de 0 a 1)
         df = df.sort_values("score", ascending=True)
 
-        # Criar distribuição cumulativa
         total_mau = (df["y"] == 1).sum()
         total_bom = (df["y"] == 0).sum()
 
         df["cumulativo_mau"] = (df["y"] == 1).cumsum() / total_mau
         df["cumulativo_bom"] = (df["y"] == 0).cumsum() / total_bom
 
-        return df["score"], df["cumulativo_mau"], df["cumulativo_bom"]
+        df["ks"] = np.abs(df["cumulativo_mau"] - df["cumulativo_bom"])
+        ks_max = df["ks"].max()
+        ks_max_score = df.loc[df["ks"].idxmax(), "score"]
+        probabilidade_mau_ks = df.loc[df["ks"].idxmax(), "cumulativo_mau"]
 
-    # Criar figura com dois subgráficos
+        return df["score"], df["cumulativo_mau"], df["cumulativo_bom"], ks_max, ks_max_score, probabilidade_mau_ks
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Lista de dados para iteração
     modelos = [
         ("LightGBM", train_lightgbm, test_lightgbm,
          test_oot_lightgbm, axes[0]),
@@ -954,43 +964,43 @@ def plot_comparacao_ks(
     ]
 
     for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
-        # Garantir que estamos usando 'score_1' como probabilidade da classe positiva (mau)
         y_train, y_test = train_df["y"], test_df["y"]
         scores_train, scores_test = train_df["score_1"], test_df["score_1"]
 
-        # Calcular curva KS para treino e teste
-        prob_train, cum_mau_train, cum_bom_train = calcular_ks(
+        prob_train, cum_mau_train, cum_bom_train, ks_train, ks_train_score, prob_mau_train = calcular_ks(
             y_train, scores_train)
-        prob_test, cum_mau_test, cum_bom_test = calcular_ks(
+        prob_test, cum_mau_test, cum_bom_test, ks_test, ks_test_score, prob_mau_test = calcular_ks(
             y_test, scores_test)
 
-        # Plotar curvas para "mau" e "bom" para treino
         ax.plot(prob_train, cum_mau_train, label=f'Treino - Mau', color='blue')
         ax.plot(prob_train, cum_bom_train, label=f'Treino - Bom',
                 linestyle='--', color='blue')
+        ax.scatter(ks_train_score, prob_mau_train, color='blue', marker='o',
+                   label=f'KS Treino = {ks_train:.2%} (P={ks_train_score:.2f})')
 
-        # Plotar curvas para "mau" e "bom" para teste
         ax.plot(prob_test, cum_mau_test, label=f'Teste - Mau', color='red')
         ax.plot(prob_test, cum_bom_test, label=f'Teste - Bom',
                 linestyle='--', color='red')
+        ax.scatter(ks_test_score, prob_mau_test, color='red', marker='o',
+                   label=f'KS Teste = {ks_test:.2%} (P={ks_test_score:.2f})')
 
-        # Se houver dados OOT, calcular e plotar
         if test_oot_df is not None:
             y_oot = test_oot_df["y"]
             scores_oot = test_oot_df["score_1"]
-            prob_oot, cum_mau_oot, cum_bom_oot = calcular_ks(y_oot, scores_oot)
+            prob_oot, cum_mau_oot, cum_bom_oot, ks_oot, ks_oot_score, prob_mau_oot = calcular_ks(
+                y_oot, scores_oot)
             ax.plot(prob_oot, cum_mau_oot, label=f'OOT - Mau', color='green')
             ax.plot(prob_oot, cum_bom_oot, label=f'OOT - Bom',
                     linestyle='--', color='green')
+            ax.scatter(ks_oot_score, prob_mau_oot, color='green', marker='o',
+                       label=f'KS OOT = {ks_oot:.2%} (P={ks_oot_score:.2f})')
 
-        # Configurações do gráfico
         ax.set_title(f'Curva KS - {nome_modelo}')
         ax.set_xlabel('Probabilidade de Mau')
         ax.set_ylabel('Percentual Acumulado da População')
         ax.legend()
         ax.grid(True)
 
-    # Exibir gráficos
     plt.tight_layout()
     plt.show()
 
@@ -1633,3 +1643,95 @@ def calcular_metricas_multiplas(bases_escoradas: Dict[str, pd.DataFrame], limiar
 
     # Converte a lista de resultados para um DataFrame e retorna
     return pd.DataFrame(resultados)
+
+
+def train_woe_binning(
+    df: pd.DataFrame,
+    variables: List[str],
+    target: str,
+    time_variable: str,
+    n_clusters: int = 4,
+    plot_vars: List[str] = None
+) -> Tuple[pd.DataFrame, Dict]:
+
+    df_result = df.copy()
+    df_result[time_variable] = df_result[time_variable].astype(
+        str)  # Garantindo que safra seja categórica
+    binning_rules = {}
+
+    for variable in variables:
+        # 1️⃣ Treinando o binning de WOE
+        binning = OptimalBinning(name=variable, dtype="numerical", solver="cp")
+        binning.fit(df[variable], df[target])
+
+        # Aplicando o binning para obter os bins
+        df_result[f"{variable}_bin"] = binning.transform(
+            df[variable], metric="bins")
+
+        # 2️⃣ Criando DataFrame para análise de estabilidade
+        stability_df = df_result.groupby(
+            [time_variable, f"{variable}_bin"]).size().unstack().fillna(0)
+        stability_df = stability_df.div(stability_df.sum(axis=1), axis=0)
+
+        # Ordenando `safra` para manter a sequência correta no gráfico
+        stability_df = stability_df.sort_index()
+
+        # 🚨 Ajustando o número de clusters para não exceder a quantidade de bins
+        num_bins = len(stability_df.columns)
+        # Garante que n_clusters não seja maior que o número de bins
+        adjusted_clusters = min(n_clusters, num_bins)
+
+        if adjusted_clusters < 2:
+            print(
+                f"⚠️ Aviso: {variable} tem apenas {num_bins} bins. Não será clusterizada.")
+            bin_map = {bin_label: "Bin_1" for bin_label in stability_df.columns}
+        else:
+            # 3️⃣ Clusterizando bins com comportamento semelhante
+            kmeans = KMeans(n_clusters=adjusted_clusters,
+                            random_state=42, n_init=10)
+            bin_clusters = kmeans.fit_predict(stability_df.T)
+            bin_map = {bin_label: f"Bin_{cluster+1}" for bin_label,
+                       cluster in zip(stability_df.columns, bin_clusters)}
+
+        df_result[f"{variable}_bin_group"] = df_result[f"{variable}_bin"].map(
+            bin_map)
+
+        # 4️⃣ Criando as regras de transformação
+        bin_edges = binning.splits
+        bin_labels = sorted(
+            df_result[f"{variable}_bin"].dropna().unique())  # Removendo NaNs
+        bin_cluster_map = {bin_: bin_map[bin_] for bin_ in bin_labels}
+
+        binning_rules[variable] = {
+            "edges": bin_edges,
+            "labels": bin_labels,
+            "bin_to_group": bin_cluster_map
+        }
+
+        # 5️⃣ Plotando estabilidade antes e depois do agrupamento
+        if plot_vars is None or variable in plot_vars:
+            stability_grouped_df = df_result.groupby(
+                [time_variable, f"{variable}_bin_group"]).size().unstack().fillna(0)
+            stability_grouped_df = stability_grouped_df.div(
+                stability_grouped_df.sum(axis=1), axis=0)
+
+            # Ordenando a safra para melhor visualização
+            stability_grouped_df = stability_grouped_df.sort_index()
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            stability_df.plot(ax=axes[0], marker='o')
+            axes[0].set_title(
+                f"Distribuição de {variable} ao Longo do Tempo (Antes do Agrupamento)")
+            axes[0].set_ylabel("Proporção")
+            axes[0].set_xlabel(time_variable)
+
+            stability_grouped_df.plot(ax=axes[1], marker='o', cmap="tab10")
+            axes[1].set_title(
+                f"Distribuição de {variable} ao Longo do Tempo (Depois do Agrupamento)")
+            axes[1].set_ylabel("Proporção")
+            axes[1].set_xlabel(time_variable)
+
+            plt.tight_layout()
+            plt.show()
+
+    return df_result, binning_rules
