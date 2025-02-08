@@ -561,18 +561,38 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
     """
 
     # Configuração do PyCaret
+
     clf_setup = setup(
         # Remove ID e Safra na modelagem
         data=train.drop(columns=[id_col, safra_col]),
         target=target_col,
-        train_size=0.8,
+
+        # SMOTE (mesmo sendo 30% de 1 e 70% de 0 vamos testar)
+        # Balanceamento de classes (caso haja desbalanceamento)
+        fix_imbalance=True,
+        fix_imbalance_method='SMOTE',
+
+        # vamos avaliar o modelo por meio da escoragem oos e oot, então não precisamos de um novo conjunto de testes.
+        train_size=0.9,
+        data_split_shuffle=True,  # Embaralhar antes de dividir
+        data_split_stratify=True,  # Estratificação para manter a proporção das classes
+
         session_id=42,
         verbose=False,
         fold_strategy='stratifiedkfold',
         fold=10,
+
+        remove_multicollinearity=True,
+        # Remove features com correlação acima de 90% (pois vamos tentar gerar novas features de segunda ordem)
+        multicollinearity_threshold=0.9,
+
+        # Engenharia de atributos
+        # polynomial_features=True,  # Criar features polinomiais
+        # polynomial_degree=2,  # Grau do polinômio
+
         normalize=True,
-        normalize_method='zscore',
-        feature_selection=False,
+        normalize_method='zscore',  # (valor - media)/desvio_padrao
+        feature_selection=False  # já fizemos esse passo anteriormente
     )
 
     # Modelos a serem comparados
@@ -586,19 +606,44 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
     tuned_lightgbm = tune_model(
         create_model('lightgbm'),  # lightgbm
         custom_grid={
-            # Reduzido para evitar complexidade excessiva
-            'num_leaves': [2, 5, 10],
-            # Taxas de aprendizado menores
-            'learning_rate': [0.005, 0.01, 0.05],
-            # Evita excesso de árvores
-            'n_estimators': [100, 200, 300],
-            'max_depth': [3],  # Limitando a profundidade
-            'subsample': [0.6, 0.8],  # Introduzindo mais aleatoriedade
-            # Evita dependência de features específicas
-            'colsample_bytree': [0.6, 0.8],
-            'reg_alpha': [0.1, 0.5, 1],  # Regularização L1 mais forte
-            'reg_lambda': [0.1, 0.5, 1]  # Regularização L2 mais forte
+
+            # ajusta a influência das classes automaticamente. (testando)
+            # 'class_weight': ['balanced'],
+
+            # Número máximo de folhas em cada árvore (define a complexidade dos splits)
+            # Valores maiores permitem capturar interações mais complexas, mas aumentam o risco de overfitting.
+            'num_leaves': [3, 5, 10, 20],
+
+            # Taxa de aprendizado (step size que controla o ajuste do modelo a cada iteração)
+            # Valores menores tornam o treinamento mais estável, mas exigem mais iterações.
+            'learning_rate': [0.005, 0.01, 0.03],
+
+            # Número total de árvores no modelo
+            # Um número maior pode melhorar a performance, mas pode levar a overfitting se for muito alto.
+            'n_estimators': [50, 100, 200],
+
+            # Profundidade máxima das árvores (limita a complexidade do modelo)
+            # Evita que o modelo fique muito profundo e overfitado aos dados de treino.
+            'max_depth': [3, 5],
+
+            # Fracção aleatória das amostras usadas para construir cada árvore (controle de bagging)
+            # Valores menores aumentam a diversidade das árvores e reduzem overfitting.
+            'subsample': [0.6, 0.75, 0.9],
+
+            # Fracção das features usadas para construir cada árvore (controle de feature bagging)
+            # Reduz a dependência de features específicas, melhorando a generalização.
+            'colsample_bytree': [0.6, 0.75, 0.9],
+
+            # Regularização L1 (Lasso), penaliza coeficientes grandes e força alguns a zero
+            # Ajuda a reduzir o overfitting tornando o modelo mais simples.
+            'reg_alpha': [0.1, 0.5, 1, 2],
+
+            # Regularização L2 (Ridge), penaliza coeficientes grandes, mas sem zerá-los
+            # Suaviza os pesos do modelo e ajuda na generalização.
+            'reg_lambda': [0.1, 0.5, 1, 2]
+
         },
+
         optimize='AUC'
     )
 
@@ -606,8 +651,17 @@ def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, saf
     tuned_lr = tune_model(
         create_model('lr'),
         custom_grid={
+            # Parâmetro de regularização inversa (quanto menor, maior a regularização)
+            # Valores menores impõem mais penalização nos coeficientes, ajudando a evitar overfitting.
             'C': [0.01, 0.1, 1, 10],
+
+            # Número máximo de iterações para a convergência do algoritmo
+            # Se o modelo não convergir, aumentar esse valor pode ajudar.
             'max_iter': [100, 200, 500],
+
+            # Algoritmo utilizado para otimizar a regressão logística
+            # 'liblinear' é indicado para pequenos datasets e modelos simples
+            # 'lbfgs' funciona bem para grandes conjuntos de dados e suporta regularização L2.
             'solver': ['liblinear', 'lbfgs']
         },
         optimize='AUC'
@@ -1282,7 +1336,7 @@ def calcular_ks_por_safra(base_escorada: pd.DataFrame) -> pd.DataFrame:
         if total_eventos == 0 or total_nao_eventos == 0:
             return 0.0, np.nan
 
-        df['acumulado_eventos'] = (df['y'].cumsum()) / total_eventos
+        df['acumulado_eventos'] = df['y'].cumsum() / total_eventos
         df['acumulado_nao_eventos'] = (
             (df['y'] == 0).cumsum()) / total_nao_eventos
 
@@ -1290,12 +1344,15 @@ def calcular_ks_por_safra(base_escorada: pd.DataFrame) -> pd.DataFrame:
                               df['acumulado_nao_eventos'])
 
         ks_max = df['diferença'].max() * 100  # Convertendo KS para percentual
-        ponto_ks = df.loc[df['diferença'].idxmax(), 'score_1']
+
+        # Garantindo que ponto_ks seja um único valor
+        ponto_ks = df.loc[df['diferença'] == df['diferença'].max(), 'score_1']
+        ponto_ks = ponto_ks.iloc[0] if not np.isscalar(ponto_ks) else ponto_ks
 
         return ks_max, ponto_ks
 
     resultados = []
-    # Adicionado observed=True para categorizar corretamente
+
     for safra, grupo in base_escorada.groupby('safra', observed=True):
         ks_max, ponto_ks = calcular_ks(grupo)
         resultados.append([safra, len(grupo), ks_max, ponto_ks])
