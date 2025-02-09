@@ -13,8 +13,3 @@
 
 
 ### Todas as funções estão documentadas em funcoes.py ##
-
-
-
-
-

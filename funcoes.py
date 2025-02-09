@@ -1902,3 +1902,5 @@ def plot_psi(train_df, test_df, variavel, bins=10):
 
     # Exibir gráfico
     plt.show()
+
+    #
