@@ -1837,3 +1837,68 @@ def plotar_ks_safra(tabela_resultados: pd.DataFrame) -> None:
     plt.legend()
     plt.grid(True)
     plt.show()
+
+
+def calculate_psi(expected, actual, bins=10):
+    """
+    Calcula o PSI entre duas distribuições.
+    """
+    min_val, max_val = min(expected), max(expected)
+    bins = np.linspace(min_val, max_val, bins + 1)
+
+    expected_dist, _ = np.histogram(expected, bins=bins)
+    actual_dist, _ = np.histogram(actual, bins=bins)
+
+    expected_dist = expected_dist / expected_dist.sum()
+    actual_dist = actual_dist / actual_dist.sum()
+
+    expected_dist = np.where(expected_dist == 0, 0.0001, expected_dist)
+    actual_dist = np.where(actual_dist == 0, 0.0001, actual_dist)
+
+    psi_values = (expected_dist - actual_dist) * \
+        np.log(expected_dist / actual_dist)
+    return psi_values.sum()
+
+
+def plot_psi(train_df, test_df, variavel, bins=10):
+    """
+    Plota um gráfico de linhas mostrando o PSI de cada safra de teste em relação ao treino.
+    """
+    # Criar referência com todas as safras de treino combinadas
+    train_values = train_df[variavel].values
+    test_months = sorted(test_df["safra"].unique())
+
+    psi_results = []
+
+    # Adicionar ponto inicial da referência (PSI = 0)
+    psi_results.append({"safra": "Safras Treino", "PSI": 0})
+
+    # Calcular PSI de cada safra de teste em relação ao treino
+    for month in test_months:
+        test_values = test_df[test_df["safra"] == month][variavel].values
+        psi = calculate_psi(train_values, test_values, bins)
+        psi_results.append({"safra": month, "PSI": psi})
+
+    # Converter para DataFrame
+    df_psi = pd.DataFrame(psi_results)
+
+    # Converter safra para string (evita TypeError)
+    df_psi["safra"] = df_psi["safra"].astype(str)
+
+    # Criar o gráfico de linhas
+    plt.figure(figsize=(10, 5))
+    sns.lineplot(x="safra", y="PSI", data=df_psi, marker="o", color="b")
+
+    # Adicionar linhas de referência para alerta e crítico
+    plt.axhline(0.1, color="orange", linestyle="--", label="Alerta PSI = 0.1")
+    plt.axhline(0.25, color="red", linestyle="--", label="Crítico PSI = 0.25")
+
+    # Ajustes no gráfico
+    plt.title("PSI: Comparação das Safras de Teste com Treino")
+    plt.ylabel("PSI")
+    plt.xlabel("Safra")
+    plt.legend()
+    plt.xticks(rotation=45)
+
+    # Exibir gráfico
+    plt.show()
