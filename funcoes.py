@@ -1,3 +1,8 @@
+import math
+from sklearn.metrics import precision_recall_curve, auc
+from pycaret.clustering import setup as clu_setup
+from pycaret.regression import setup as reg_setup
+from pycaret.classification import setup as cls_setup, create_model, tune_model
 from sklearn.metrics import roc_curve, auc
 from typing import Dict
 from typing import Tuple, List
@@ -539,408 +544,181 @@ def grafico_variaveis_categoricas(df: pd.DataFrame) -> None:
 ################################# MODELAGEM - TREINAMENTO E ESCORAGEM ####################################################################
 
 
-def pipeline_modelagem(train: pd.DataFrame, test: pd.DataFrame, id_col: str, safra_col: str, target_col: str, lista_vars_numericas_categorizar: List[str]) -> tuple[
-    pd.DataFrame, pd.DataFrame, Any, Any, Any, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame
-]:
+def treinar_e_tunar_modelo(target: str, data, model_name: str, setup_params: dict, tune_params: dict, problem_type="classification"):
     """
-    Função para treinar modelos de classificação (LightGBM e Regressão Logística) com tunning de hiperparâmetros usando PyCaret.
+    Configura o ambiente do PyCaret, treina e realiza o tuning do modelo escolhido.
 
     Parâmetros:
-    df (pd.DataFrame): DataFrame contendo os dados
-    id_col (str): Nome da coluna identificadora (será mantida nas bases escoradas)
-    safra_col (str): Nome da coluna da safra (será mantida nas bases escoradas)
-    target_col (str): Nome da variável alvo (target)
+    - target (str): Nome da coluna alvo.
+    - data (DataFrame): Conjunto de dados para treinar o modelo.
+    - model_name (str): Nome do modelo a ser criado (ex: 'rf' para Random Forest).
+    - setup_params (dict): Parâmetros para a função setup() do PyCaret.
+    - tune_params (dict): Parâmetros para a função tune_model() do PyCaret.
+    - problem_type (str): Tipo de problema ('classification', 'regression' ou 'clustering').
 
     Retorna:
-    - pipeline_miss: objeto para fit_transform, imputer de missings
-    - DataFrame de desenvolvimento (train)
-    - DataFrame de validação (test)
-    - Objeto do modelo LightGBM ajustado
-    - Objeto do modelo Regressão Logística ajustado
-    - DataFrame de treino escorado para LightGBM
-    - DataFrame de teste escorado para LightGBM
-    - DataFrame de treino escorado para Regressão Logística
-    - DataFrame de teste escorado para Regressão Logística
+    - Modelo ajustado (tuned_model).
     """
-
-    # Configuração do PyCaret
-
-    clf_setup = setup(
-        # Remove ID e Safra na modelagem
-        data=train.drop(columns=[id_col, safra_col]),
-        target=target_col,
-
-        # SMOTE (mesmo sendo 30% de 1 e 70% de 0 vamos testar)
-        # Balanceamento de classes (caso haja desbalanceamento)
-        # fix_imbalance=True,
-        # fix_imbalance_method='SMOTE',
-        numeric_imputation="median",
-        categorical_imputation="most_frequent",
-
-        # 🔸 Discretizando (binning) variáveis numéricas para reduzir oscilações extremas
-        bin_numeric_features=lista_vars_numericas_categorizar,  # Agrupar em faixas
-
-        # vamos avaliar o modelo por meio da escoragem oos e oot, então não precisamos de um novo conjunto de testes.
-        train_size=0.9,
-        data_split_shuffle=True,  # Embaralhar antes de dividir
-        data_split_stratify=True,  # Estratificação para manter a proporção das classes
-
-        session_id=42,
-        verbose=False,
-        fold_strategy='stratifiedkfold',
-        fold=10,
-
-        remove_multicollinearity=True,
-        # Remove features com correlação acima de 90% (pois vamos tentar gerar novas features de segunda ordem)
-        multicollinearity_threshold=0.9,
-
-        # Engenharia de atributos
-        # polynomial_features=True,  # Criar features polinomiais
-        # polynomial_degree=2,  # Grau do polinômio
-
-        normalize=True,
-        normalize_method='zscore',  # (valor - media)/desvio_padrao
-        feature_selection=False,  # já fizemos esse passo anteriormente
-
-
-    )
-
-    # Modelos a serem comparados
-    models_to_compare = ['lightgbm', 'lr']
-
-    # Comparação de modelos
-    best_model_initial = compare_models(
-        include=models_to_compare, sort='AUC', turbo=False)
-
-    # Hiperparâmetros otimizados para LightGBM
-    tuned_lightgbm = tune_model(
-        create_model('lightgbm'),  # lightgbm
-        custom_grid={
-
-            # ajusta a influência das classes automaticamente. (testando)
-            'class_weight': ['balanced'],
-
-            # Número máximo de folhas em cada árvore (define a complexidade dos splits)
-            # Valores maiores permitem capturar interações mais complexas, mas aumentam o risco de overfitting.
-            'num_leaves': [3, 5, 10, 20],
-
-            # Taxa de aprendizado (step size que controla o ajuste do modelo a cada iteração)
-            # Valores menores tornam o treinamento mais estável, mas exigem mais iterações.
-            'learning_rate': [0.005, 0.01, 0.03],
-
-            # Número total de árvores no modelo
-            # Um número maior pode melhorar a performance, mas pode levar a overfitting se for muito alto.
-            'n_estimators': [50, 100, 200],
-
-            # Profundidade máxima das árvores (limita a complexidade do modelo)
-            # Evita que o modelo fique muito profundo e overfitado aos dados de treino.
-            'max_depth': [3, 5],
-
-            # Fracção aleatória das amostras usadas para construir cada árvore (controle de bagging)
-            # Valores menores aumentam a diversidade das árvores e reduzem overfitting.
-            'subsample': [0.6, 0.75, 0.9],
-
-            # Fracção das features usadas para construir cada árvore (controle de feature bagging)
-            # Reduz a dependência de features específicas, melhorando a generalização.
-            'colsample_bytree': [0.6, 0.75, 0.9],
-
-            # Regularização L1 (Lasso), penaliza coeficientes grandes e força alguns a zero
-            # Ajuda a reduzir o overfitting tornando o modelo mais simples.
-            'reg_alpha': [0.1, 0.5, 1, 2],
-
-            # Regularização L2 (Ridge), penaliza coeficientes grandes, mas sem zerá-los
-            # Suaviza os pesos do modelo e ajuda na generalização.
-            'reg_lambda': [0.1, 0.5, 1, 2]
-
-        },
-
-        optimize='AUC'
-    )
-
-    # Hiperparâmetros otimizados para Regressão Logística
-    tuned_lr = tune_model(
-        create_model('lr'),
-        custom_grid={
-            # Parâmetro de regularização inversa (quanto menor, maior a regularização)
-            # Valores menores impõem mais penalização nos coeficientes, ajudando a evitar overfitting.
-            'C': [0.01, 0.1, 1, 10],
-
-            # Número máximo de iterações para a convergência do algoritmo
-            # Se o modelo não convergir, aumentar esse valor pode ajudar.
-            'max_iter': [100, 200, 500],
-
-            # Algoritmo utilizado para otimizar a regressão logística
-            # 'liblinear' é indicado para pequenos datasets e modelos simples
-            # 'lbfgs' funciona bem para grandes conjuntos de dados e suporta regularização L2.
-            'solver': ['liblinear', 'lbfgs']
-        },
-        optimize='AUC'
-    )
-
-    # Escolha do melhor modelo
-    final_best_model = compare_models(
-        include=[tuned_lightgbm, tuned_lr],
-        sort='AUC'
-    )
-
-    # Obtendo métricas de cada modelo
-    results_lgbm = pull()
-    metrics_lgbm = results_lgbm.loc[results_lgbm['Model']
-                                    == 'Light Gradient Boosting Machine']
-
-    results_lr = pull()
-    metrics_lr = results_lr.loc[results_lr['Model'] == 'Logistic Regression']
-
-    auc_lgbm = metrics_lgbm['AUC'].values[0] if 'AUC' in results_lgbm.columns else "N/A"
-    auc_lr = metrics_lr['AUC'].values[0] if 'AUC' in results_lr.columns else "N/A"
-
-    # Impressão do modelo vencedor e justificativa
-    print("\n🏆 **Modelo Vencedor:**", final_best_model)
-    if final_best_model == tuned_lightgbm:
-        print(f"✅ LightGBM escolhido com AUC: {auc_lgbm}")
+    # Escolhe o tipo de problema
+    if problem_type == "classification":
+        cls_setup(data=data, target=target, **setup_params)
+    elif problem_type == "regression":
+        reg_setup(data=data, target=target, **setup_params)
+    elif problem_type == "clustering":
+        clu_setup(data=data, **setup_params)
     else:
-        print(f"✅ Regressão Logística escolhida com AUC: {auc_lr}")
+        raise ValueError(
+            "Tipo de problema inválido! Escolha entre 'classification', 'regression' ou 'clustering'.")
 
-    # 🔹 ESCORAGEM DOS MODELOS
+    # Criando o modelo
+    model = create_model(model_name)
 
-    # Aplicando LightGBM no conjunto de treino e teste
-    train_lightgbm_scored = predict_model(
-        tuned_lightgbm, data=train, probability_threshold=0.5, raw_score=True)
-    test_lightgbm_scored = predict_model(
-        tuned_lightgbm, data=test, probability_threshold=0.5, raw_score=True)
+    # tunando o modelo
+    tuned_model = tune_model(model, custom_grid=tune_params, optimize='AUC')
 
-    # Aplicando Regressão Logística no conjunto de treino e teste
-    train_lr_scored = predict_model(
-        tuned_lr, data=train, probability_threshold=0.5, raw_score=True)
-    test_lr_scored = predict_model(
-        tuned_lr, data=test, probability_threshold=0.5, raw_score=True)
-
-    print("base escorada pycaret")
-    print(train_lightgbm_scored)
-    print(train_lightgbm_scored.columns)
-
-    prob_col_1 = 'prediction_score_1'
-
-    # Criar a coluna Score_0 como 1 - probabilidade da classe 1
-    train_lightgbm_escorado = train[[id_col, safra_col, target_col]].copy()
-    train_lightgbm_escorado["score_1"] = train_lightgbm_scored[prob_col_1]
-    train_lightgbm_escorado["score_0"] = 1 - train_lightgbm_escorado["score_1"]
-
-    test_lightgbm_escorado = test[[id_col, safra_col, target_col]].copy()
-    test_lightgbm_escorado["score_1"] = test_lightgbm_scored[prob_col_1]
-    test_lightgbm_escorado["score_0"] = 1 - test_lightgbm_escorado["score_1"]
-
-    train_regressao_escorado = train[[id_col, safra_col, target_col]].copy()
-    train_regressao_escorado["score_1"] = train_lr_scored[prob_col_1]
-    train_regressao_escorado["score_0"] = 1 - \
-        train_regressao_escorado["score_1"]
-
-    test_regressao_escorado = test[[id_col, safra_col, target_col]].copy()
-    test_regressao_escorado["score_1"] = test_lr_scored[prob_col_1]
-    test_regressao_escorado["score_0"] = 1 - test_regressao_escorado["score_1"]
-
-    # Retornando os resultados
-    return train, test, tuned_lightgbm, tuned_lr, train_lightgbm_escorado, test_lightgbm_escorado, train_regressao_escorado, test_regressao_escorado
+    return tuned_model
 
 
 ############################################ FUNCOES DE METRICAS E AVALIACAO DE MODELOS ############################################
 
 
-def plot_comparacao_roc(
-    train_lightgbm: pd.DataFrame,
-    test_lightgbm: pd.DataFrame,
-    train_regressao: pd.DataFrame,
-    test_regressao: pd.DataFrame,
-    test_oot_lightgbm: pd.DataFrame = None,
-    test_oot_regressao: pd.DataFrame = None
-) -> None:
+def plot_comparacao_roc(bases_nomeadas: dict, nome_graficos: dict) -> None:
     """
-    Gera dois gráficos de curva ROC lado a lado para comparar os modelos LightGBM e Regressão Logística.
-
-    O primeiro gráfico contém as curvas ROC do modelo LightGBM para treino, teste e opcionalmente OOT.
-    O segundo gráfico contém as curvas ROC do modelo de Regressão Logística para treino, teste e opcionalmente OOT.
+    Gera gráficos de curva ROC dinamicamente de acordo com as bases fornecidas.
 
     Parâmetros:
-    - train_lightgbm (pd.DataFrame): DataFrame com os dados de treino para o modelo LightGBM.
-    - test_lightgbm (pd.DataFrame): DataFrame com os dados de teste para o modelo LightGBM.
-    - train_regressao (pd.DataFrame): DataFrame com os dados de treino para o modelo de Regressão Logística.
-    - test_regressao (pd.DataFrame): DataFrame com os dados de teste para o modelo de Regressão Logística.
-    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo LightGBM.
-    - test_oot_regressao (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo de Regressão Logística.
-
-    Retorno:
-    - None. A função exibe os gráficos.
+    - bases_nomeadas (dict): Dicionário onde cada chave é o nome da base, e o valor é uma lista com:
+        - DataFrame contendo colunas "y" (rótulos verdadeiros) e "score_1" (probabilidades preditas).
+        - Número inteiro indicando o gráfico onde a curva deve ser plotada.
+    - nome_graficos (dict): Dicionário que mapeia números inteiros para nomes dos gráficos.
     """
 
-    # Criar figura com dois subgráficos
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # Identificar o número total de gráficos necessários
+    num_graficos = max(v[1] for v in bases_nomeadas.values())
 
-    # Lista de dados para iteração
-    modelos = [
-        ("LightGBM", train_lightgbm, test_lightgbm,
-         test_oot_lightgbm, axes[0]),
-        ("Regressão Logística", train_regressao,
-         test_regressao, test_oot_regressao, axes[1])
-    ]
+    # Criar a figura com subgráficos dinâmicos
+    fig, axes = plt.subplots(1, num_graficos, figsize=(6 * num_graficos, 6))
+    if num_graficos == 1:
+        # Garantir que axes seja iterável quando há apenas um gráfico
+        axes = [axes]
 
-    for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
-        # Garantir que estamos usando score_1 (probabilidade da classe positiva)
-        y_train, y_test = train_df["y"], test_df["y"]
-        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
+    # Dicionário para rastrear curvas por gráfico
+    legendas_adicionadas = {i: False for i in range(1, num_graficos + 1)}
 
-        # Calcular curva ROC para treino
-        fpr_train, tpr_train, _ = roc_curve(y_train, scores_train)
-        auc_train = auc(fpr_train, tpr_train)
+    # Iterar sobre os dataframes fornecidos
+    for nome, (df, grafico_id) in bases_nomeadas.items():
+        if df is not None and grafico_id in range(1, num_graficos + 1):
+            ax = axes[grafico_id - 1]
 
-        # Calcular curva ROC para teste
-        fpr_test, tpr_test, _ = roc_curve(y_test, scores_test)
-        auc_test = auc(fpr_test, tpr_test)
+            # Obter valores reais e probabilidades preditas
+            y_true = df["y"]
+            scores = df["score_1"]
 
-        # Plotar curvas para treino e teste
-        ax.plot(fpr_train, tpr_train,
-                label=f'Treino (AUC = {auc_train:.2f})', color='blue')
-        ax.plot(fpr_test, tpr_test,
-                label=f'Teste (AUC = {auc_test:.2f})', color='red')
+            # Calcular curva ROC
+            fpr, tpr, _ = roc_curve(y_true, scores)
+            auc_score = auc(fpr, tpr)
 
-        # Se houver dados OOT, calcular e plotar
-        if test_oot_df is not None:
-            y_oot = test_oot_df["y"]
-            scores_oot = test_oot_df["score_1"]
-            fpr_oot, tpr_oot, _ = roc_curve(y_oot, scores_oot)
-            auc_oot = auc(fpr_oot, tpr_oot)
-            ax.plot(fpr_oot, tpr_oot,
-                    label=f'OOT (AUC = {auc_oot:.2f})', color='green')
+            # Plotar curva ROC
+            ax.plot(fpr, tpr, label=f'{nome} (AUC = {auc_score:.2f})')
 
-        # Linha diagonal de referência
-        ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
+            # Configurações do gráfico
+            if not legendas_adicionadas[grafico_id]:
+                ax.plot([0, 1], [0, 1], linestyle='--',
+                        color='gray')  # Linha diagonal
+                titulo = nome_graficos.get(grafico_id, f'Gráfico {grafico_id}')
+                ax.set_title(f'Curva ROC - {titulo}')
+                ax.set_xlabel('Taxa de Falsos Positivos (FPR)')
+                ax.set_ylabel('Taxa de Verdadeiros Positivos (TPR)')
+                legendas_adicionadas[grafico_id] = True
 
-        # Configurações do gráfico
-        ax.set_title(f'Curva ROC - {nome_modelo}')
-        ax.set_xlabel('Taxa de Falsos Positivos (FPR)')
-        ax.set_ylabel('Taxa de Verdadeiros Positivos (TPR)')
-        ax.legend()
-        ax.grid(True)
-
-    # Exibir gráficos
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_comparacao_prc(
-    train_lightgbm: pd.DataFrame,
-    test_lightgbm: pd.DataFrame,
-    train_regressao: pd.DataFrame,
-    test_regressao: pd.DataFrame,
-    test_oot_lightgbm: pd.DataFrame = None,
-    test_oot_regressao: pd.DataFrame = None
-) -> None:
-    """
-    Gera dois gráficos de Curva de Precisão-Revocação (PRC) lado a lado para comparar os modelos LightGBM e Regressão Logística.
-
-    O primeiro gráfico contém as curvas PRC do modelo LightGBM para treino, teste e opcionalmente OOT.
-    O segundo gráfico contém as curvas PRC do modelo de Regressão Logística para treino, teste e opcionalmente OOT.
-
-    Parâmetros:
-    - train_lightgbm (pd.DataFrame): DataFrame com os dados de treino para o modelo LightGBM.
-    - test_lightgbm (pd.DataFrame): DataFrame com os dados de teste para o modelo LightGBM.
-    - train_regressao (pd.DataFrame): DataFrame com os dados de treino para o modelo de Regressão Logística.
-    - test_regressao (pd.DataFrame): DataFrame com os dados de teste para o modelo de Regressão Logística.
-    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo LightGBM.
-    - test_oot_regressao (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo de Regressão Logística.
-
-    Retorno:
-    - None. A função exibe os gráficos.
-    """
-
-    # Criar uma figura com dois gráficos lado a lado
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Lista com os modelos para iterar
-    modelos = [
-        ("LightGBM", train_lightgbm, test_lightgbm,
-         test_oot_lightgbm, axes[0]),
-        ("Regressão Logística", train_regressao,
-         test_regressao, test_oot_regressao, axes[1])
-    ]
-
-    for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
-        # Definir variáveis de resposta e pontuações preditivas
-        y_train, y_test = train_df["y"], test_df["y"]
-        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
-
-        # Calcular Curva PRC para treino
-        precision_train, recall_train, _ = precision_recall_curve(
-            y_train, scores_train)
-        auc_train = auc(recall_train, precision_train)
-
-        # Calcular Curva PRC para teste
-        precision_test, recall_test, _ = precision_recall_curve(
-            y_test, scores_test)
-        auc_test = auc(recall_test, precision_test)
-
-        # Plotar curva PRC para treino e teste
-        ax.plot(recall_train, precision_train,
-                label=f'Treino (AUC = {auc_train:.2f})', color='blue')
-        ax.plot(recall_test, precision_test,
-                label=f'Teste (AUC = {auc_test:.2f})', color='red')
-
-        # Se houver dados OOT, calcular e plotar
-        if test_oot_df is not None:
-            y_oot = test_oot_df["y"]
-            scores_oot = test_oot_df["score_1"]
-            precision_oot, recall_oot, _ = precision_recall_curve(
-                y_oot, scores_oot)
-            auc_oot = auc(recall_oot, precision_oot)
-            ax.plot(recall_oot, precision_oot,
-                    label=f'OOT (AUC = {auc_oot:.2f})', color='green')
-
-        # Configurações do gráfico
-        ax.set_title(f'Curva PRC - {nome_modelo}')
-        ax.set_xlabel('Revocação')
-        ax.set_ylabel('Precisão')
-        ax.legend()
-        ax.grid(True)
+            ax.legend()
+            ax.grid(True)
 
     # Ajustar layout e exibir gráficos
     plt.tight_layout()
     plt.show()
 
 
-def plot_comparacao_ks(
-    train_lightgbm: pd.DataFrame,
-    test_lightgbm: pd.DataFrame,
-    train_regressao: pd.DataFrame,
-    test_regressao: pd.DataFrame,
-    test_oot_lightgbm: pd.DataFrame = None,
-    test_oot_regressao: pd.DataFrame = None
-) -> None:
+def plot_comparacao_prc(bases_nomeadas: dict, nome_graficos: dict) -> None:
     """
-    Gera dois gráficos da Curva KS (Kolmogorov-Smirnov) lado a lado para comparar os modelos LightGBM e Regressão Logística.
-
-    O eixo X representa a probabilidade de mau (score do modelo, variando de 0 a 1).
-    O eixo Y representa a população acumulada para cada classe (mau e bom).
-
-    O primeiro gráfico contém as curvas KS do modelo LightGBM para treino, teste e opcionalmente OOT.
-    O segundo gráfico contém as curvas KS do modelo de Regressão Logística para treino, teste e opcionalmente OOT.
+    Gera gráficos de Curva de Precisão-Revocação (PRC) dinamicamente para diferentes modelos,
+    garantindo que todos fiquem lado a lado em uma única linha.
 
     Parâmetros:
-    - train_lightgbm (pd.DataFrame): DataFrame com os dados de treino para o modelo LightGBM.
-    - test_lightgbm (pd.DataFrame): DataFrame com os dados de teste para o modelo LightGBM.
-    - train_regressao (pd.DataFrame): DataFrame com os dados de treino para o modelo de Regressão Logística.
-    - test_regressao (pd.DataFrame): DataFrame com os dados de teste para o modelo de Regressão Logística.
-    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo LightGBM.
-    - test_oot_regressao (pd.DataFrame, opcional): DataFrame com os dados OOT para o modelo de Regressão Logística.
+    - bases_nomeadas (dict): Dicionário contendo os DataFrames nomeados, no formato:
+        {
+            "Nome da base": [dataframe, número_do_gráfico],
+            ...
+        }
+    - nome_graficos (dict): Dicionário que mapeia os números dos gráficos para seus títulos:
+        {
+            número_do_gráfico: "Nome do Modelo",
+            ...
+        }
 
     Retorno:
     - None. A função exibe os gráficos.
     """
+    # Identificar quantos gráficos são necessários
+    num_graficos = len(set(num for _, num in bases_nomeadas.values()))
+
+    # Forçar todos os gráficos em uma única linha
+    colunas = num_graficos
+    linhas = 1
+
+    # Ajustar o tamanho da figura proporcionalmente ao número de gráficos
+    fig, axes = plt.subplots(linhas, colunas, figsize=(
+        5 * colunas, 5))  # Ajusta largura conforme necessidade
+
+    # Garantir que axes seja iterável
+    axes = axes.flatten() if num_graficos > 1 else [axes]
+
+    # Organizar os DataFrames por gráfico
+    dados_por_grafico = {i: [] for i in nome_graficos.keys()}
+    for nome, (df, grafico_id) in bases_nomeadas.items():
+        if grafico_id in dados_por_grafico:
+            dados_por_grafico[grafico_id].append((nome, df))
+
+    # Plotar cada gráfico
+    for idx, (grafico_id, dados) in enumerate(dados_por_grafico.items()):
+        ax = axes[idx]
+        ax.set_title(f'Curva PRC - {nome_graficos[grafico_id]}')
+
+        for nome_df, df in dados:
+            y_true = df["y"]
+            scores = df["score_1"]
+            precision, recall, _ = precision_recall_curve(y_true, scores)
+            auc_score = auc(recall, precision)
+            ax.plot(recall, precision,
+                    label=f'{nome_df} (AUC = {auc_score:.2f})')
+
+        ax.set_xlabel('Revocação')
+        ax.set_ylabel('Precisão')
+        ax.legend()
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_comparacao_ks(bases_nomeadas: dict, nome_graficos: dict) -> None:
+    """
+    Gera gráficos da Curva KS (Kolmogorov-Smirnov) para múltiplos modelos.
+
+    Parâmetros:
+    - bases_nomeadas (dict): Dicionário onde a chave é o nome da base, 
+      e o valor é uma lista contendo [DataFrame, número do gráfico].
+    - nome_graficos (dict): Dicionário onde a chave é o número do gráfico 
+      e o valor é o nome do modelo correspondente.
+
+    Retorno:
+    - None. A função exibe os gráficos dinamicamente conforme a necessidade.
+    """
 
     def calcular_ks(y_true, scores):
-        """Calcula a curva KS para 'mau' (y=1) e 'bom' (y=0),
-        mostrando a população acumulada sobre a probabilidade de mau."""
-
-        df = pd.DataFrame({"y": y_true, "score": scores})
-        df = df.sort_values("score", ascending=True)
+        """Calcula a curva KS para 'mau' (y=1) e 'bom' (y=0)."""
+        df = pd.DataFrame({"y": y_true, "score": scores}
+                          ).sort_values("score", ascending=True)
 
         total_mau = (df["y"] == 1).sum()
         total_bom = (df["y"] == 0).sum()
@@ -955,162 +733,270 @@ def plot_comparacao_ks(
 
         return df["score"], df["cumulativo_mau"], df["cumulativo_bom"], ks_max, ks_max_score, probabilidade_mau_ks
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # Organizar os dataframes por gráficos
+    graficos_dict = {}
+    for nome, (df, num_grafico) in bases_nomeadas.items():
+        if num_grafico not in graficos_dict:
+            graficos_dict[num_grafico] = []
+        graficos_dict[num_grafico].append((nome, df))
 
-    modelos = [
-        ("LightGBM", train_lightgbm, test_lightgbm,
-         test_oot_lightgbm, axes[0]),
-        ("Regressão Logística", train_regressao,
-         test_regressao, test_oot_regressao, axes[1])
-    ]
+    num_graficos = len(graficos_dict)
 
-    for nome_modelo, train_df, test_df, test_oot_df, ax in modelos:
-        y_train, y_test = train_df["y"], test_df["y"]
-        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
+    # Forçar no máximo 4 gráficos lado a lado
+    cols = min(num_graficos, 4)
+    rows = math.ceil(num_graficos / cols)
 
-        prob_train, cum_mau_train, cum_bom_train, ks_train, ks_train_score, prob_mau_train = calcular_ks(
-            y_train, scores_train)
-        prob_test, cum_mau_test, cum_bom_test, ks_test, ks_test_score, prob_mau_test = calcular_ks(
-            y_test, scores_test)
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
+    if num_graficos == 1:
+        axes = [axes]  # Garantir que seja iterável mesmo com 1 gráfico
+    elif rows == 1:
+        axes = axes.reshape(1, -1)  # Ajuste para uma única linha
 
-        ax.plot(prob_train, cum_mau_train, label=f'Treino - Mau', color='blue')
-        ax.plot(prob_train, cum_bom_train, label=f'Treino - Bom',
-                linestyle='--', color='blue')
-        ax.scatter(ks_train_score, prob_mau_train, color='blue', marker='o',
-                   label=f'KS Treino = {ks_train:.2%} (P={ks_train_score:.2f})')
+    axes = axes.flatten()  # Converter matriz para lista iterável
 
-        ax.plot(prob_test, cum_mau_test, label=f'Teste - Mau', color='red')
-        ax.plot(prob_test, cum_bom_test, label=f'Teste - Bom',
-                linestyle='--', color='red')
-        ax.scatter(ks_test_score, prob_mau_test, color='red', marker='o',
-                   label=f'KS Teste = {ks_test:.2%} (P={ks_test_score:.2f})')
+    # Definir cores fixas para manter a consistência
+    cores_fixas = {
+        "Treino": "blue",
+        "Teste": "red",
+        "OOT": "green"
+    }
 
-        if test_oot_df is not None:
-            y_oot = test_oot_df["y"]
-            scores_oot = test_oot_df["score_1"]
-            prob_oot, cum_mau_oot, cum_bom_oot, ks_oot, ks_oot_score, prob_mau_oot = calcular_ks(
-                y_oot, scores_oot)
-            ax.plot(prob_oot, cum_mau_oot, label=f'OOT - Mau', color='green')
-            ax.plot(prob_oot, cum_bom_oot, label=f'OOT - Bom',
-                    linestyle='--', color='green')
-            ax.scatter(ks_oot_score, prob_mau_oot, color='green', marker='o',
-                       label=f'KS OOT = {ks_oot:.2%} (P={ks_oot_score:.2f})')
+    # Plotar cada gráfico
+    for idx, (num_grafico, bases) in enumerate(graficos_dict.items()):
+        ax = axes[idx]
+        titulo = nome_graficos.get(num_grafico, f"Gráfico {num_grafico}")
 
-        ax.set_title(f'Curva KS - {nome_modelo}')
+        for nome_base, df in bases:
+            y = df["y"]
+            scores = df["score_1"]
+
+            prob, cum_mau, cum_bom, ks, ks_score, prob_mau = calcular_ks(
+                y, scores)
+
+            # Identificar se é treino, teste ou OOT pelo nome
+            cor = cores_fixas["Treino"] if "Train" in nome_base else (
+                cores_fixas["Teste"] if "Test" in nome_base else cores_fixas["OOT"]
+            )
+
+            ax.plot(prob, cum_mau, label=f'{nome_base} - Mau', color=cor)
+            ax.plot(prob, cum_bom, linestyle='--',
+                    label=f'{nome_base} - Bom', color=cor)
+            ax.scatter(ks_score, prob_mau, color=cor, marker='o',
+                       label=f'KS = {ks:.2%} (P={ks_score:.2f})')
+
+        ax.set_title(f'Curva KS - {titulo}')
         ax.set_xlabel('Probabilidade de Mau')
         ax.set_ylabel('Percentual Acumulado da População')
         ax.legend()
         ax.grid(True)
 
+    # Esconder gráficos vazios caso não sejam múltiplos perfeitos
+    for j in range(idx + 1, len(axes)):
+        fig.delaxes(axes[j])
+
     plt.tight_layout()
     plt.show()
 
 
-def plot_comparacao_decil(
-    train_lightgbm: pd.DataFrame,
-    test_lightgbm: pd.DataFrame,
-    train_regressao: pd.DataFrame,
-    test_regressao: pd.DataFrame,
-    test_oot_lightgbm: pd.DataFrame = None,
-    test_oot_regressao: pd.DataFrame = None,
-    num_divisoes: int = 10
-) -> None:
+def plot_comparacao_decil(bases_nomeadas: dict, nome_graficos: dict, num_divisoes: int = 10) -> None:
     """
-    Gera gráficos de barras comparativos da distribuição por decis (ou outra divisão escolhida)
-    para os modelos LightGBM e Regressão Logística. Inclui uma linha horizontal indicando a taxa média de maus.
+    Gera gráficos comparativos da distribuição por decis para os modelos especificados no dicionário de entrada.
 
     Parâmetros:
-    - train_lightgbm (pd.DataFrame): DataFrame de treino para o modelo LightGBM.
-    - test_lightgbm (pd.DataFrame): DataFrame de teste para o modelo LightGBM.
-    - train_regressao (pd.DataFrame): DataFrame de treino para o modelo de Regressão Logística.
-    - test_regressao (pd.DataFrame): DataFrame de teste para o modelo de Regressão Logística.
-    - test_oot_lightgbm (pd.DataFrame, opcional): DataFrame OOT para LightGBM.
-    - test_oot_regressao (pd.DataFrame, opcional): DataFrame OOT para Regressão Logística.
+    - bases_nomeadas (dict): Dicionário contendo os dataframes e o número do gráfico correspondente.
+    - nome_graficos (dict): Dicionário mapeando os números dos gráficos para seus títulos.
     - num_divisoes (int): Número de divisões para os grupos (exemplo: 10 para decis, 5 para quintis etc.).
 
     Retorno:
-    - None. A função exibe os gráficos de barras.
+    - None. A função exibe os gráficos.
     """
 
     def calcular_decil(y_true, scores, num_divisoes):
         """Divide os dados em grupos e calcula a taxa de eventos (mau) por grupo."""
         df = pd.DataFrame({"y": y_true, "score": scores})
-
-        # Criar os grupos (decis, quintis, etc.)
         df["grupo"] = pd.qcut(df["score"], q=num_divisoes,
                               labels=False, duplicates="drop")
+        return df.groupby("grupo")["y"].mean()
 
-        # Calcular a taxa de maus por grupo
-        decil_summary = df.groupby("grupo")["y"].mean()
+    # Identificar quantos gráficos únicos são necessários
+    modelos_ids = set(v[1] for v in bases_nomeadas.values())
+    num_graficos = len(modelos_ids)
+    num_colunas = min(4, num_graficos)  # Máximo de 4 gráficos por linha
+    # Definir o número de linhas
+    num_linhas = math.ceil(num_graficos / num_colunas)
 
-        return decil_summary
+    fig, axes = plt.subplots(num_linhas, num_colunas, figsize=(
+        num_colunas * 5, num_linhas * 5), squeeze=False)
 
-    # Criar figura com dois subgráficos
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    # Definir cores fixas para os tipos de dados
+    cores = {"Treino": "blue", "Teste": "red", "OOT": "green"}
 
-    # Lista de dados para iteração
-    modelos = [
-        ("LightGBM", train_lightgbm, test_lightgbm,
-         test_oot_lightgbm, axes[0]),
-        ("Regressão Logística", train_regressao,
-         test_regressao, test_oot_regressao, axes[1])
-    ]
+    # Organizar os DataFrames por gráfico
+    dados_por_grafico = {k: [] for k in modelos_ids}
+    for nome, (df, grafico_id) in bases_nomeadas.items():
+        dados_por_grafico[grafico_id].append((nome, df))
 
-    for nome_modelo, train_df, test_df, oot_df, ax in modelos:
-        # Garantir que estamos usando 'score_1' como probabilidade da classe positiva (mau)
-        y_train, y_test = train_df["y"], test_df["y"]
-        scores_train, scores_test = train_df["score_1"], test_df["score_1"]
+    # Garantir que todos os gráficos tenham o mesmo range no eixo X e Y
+    indices_padrao = np.arange(num_divisoes)
+    max_y = 0  # Inicializar valor máximo do eixo Y
 
-        # Calcular distribuição por decis
-        decil_train = calcular_decil(y_train, scores_train, num_divisoes)
-        decil_test = calcular_decil(y_test, scores_test, num_divisoes)
+    # Primeiro loop: Encontrar o maior valor para padronizar o eixo Y
+    for dados in dados_por_grafico.values():
+        for _, df in dados:
+            y_true = df["y"]
+            scores = df["score_1"]
+            decil = calcular_decil(y_true, scores, num_divisoes)
+            # Atualiza o maior valor encontrado
+            max_y = max(max_y, decil.max())
 
-        # Taxa média de maus
-        taxa_mau_train = round(y_train.mean(), 4)
-        taxa_mau_test = round(y_test.mean(), 4)
+    # Segundo loop: Plotar os gráficos com eixo Y padronizado
+    for i, (grafico_id, dados) in enumerate(dados_por_grafico.items()):
+        linha, coluna = divmod(i, num_colunas)
+        ax = axes[linha, coluna]
 
-        # Se houver OOT, calcular também
-        if oot_df is not None:
-            y_oot = oot_df["y"]
-            scores_oot = oot_df["score_1"]
-            decil_oot = calcular_decil(y_oot, scores_oot, num_divisoes)
-            taxa_mau_oot = round(y_oot.mean(), 4)
-        else:
-            decil_oot = None
-            taxa_mau_oot = None
+        largura = 0.3  # Largura das barras para separação
+        deslocamento = -largura * (len(dados) / 2)  # Centralizar as barras
 
-        # Criar gráfico de barras
-        indices = np.arange(len(decil_train))
-        largura = 0.3  # Largura das barras
+        for nome, df in dados:
+            y_true = df["y"]
+            scores = df["score_1"]
+            decil = calcular_decil(y_true, scores, num_divisoes)
+            taxa_mau = round(y_true.mean(), 4)
 
-        ax.bar(indices - largura, decil_train,
-               largura, label="Treino", color="blue")
-        ax.bar(indices, decil_test, largura, label="Teste", color="red")
+            # Identificar se é treino, teste ou OOT
+            if "Train" in nome:
+                tipo = "Treino"
+            elif "Test" in nome:
+                tipo = "Teste"
+            else:
+                tipo = "OOT"
 
-        if decil_oot is not None:
-            ax.bar(indices + largura, decil_oot,
-                   largura, label="OOT", color="green")
+            cor = cores[tipo]
 
-        # Adicionar linha horizontal com a taxa média de maus, com valores na legenda
-        ax.axhline(taxa_mau_train, color="blue", linestyle="--", linewidth=1,
-                   label=f"Média Treino: {taxa_mau_train:.2%}")
-        ax.axhline(taxa_mau_test, color="red", linestyle="--", linewidth=1,
-                   label=f"Média Teste: {taxa_mau_test:.2%}")
+            ax.bar(indices_padrao + deslocamento, decil,
+                   largura, label=nome, color=cor)
+            ax.axhline(taxa_mau, color=cor, linestyle="--",
+                       linewidth=1, label=f"Média {tipo}: {taxa_mau:.2%}")
 
-        if taxa_mau_oot is not None:
-            ax.axhline(taxa_mau_oot, color="green", linestyle="--", linewidth=1,
-                       label=f"Média OOT: {taxa_mau_oot:.2%}")
+            deslocamento += largura  # Deslocar para a próxima barra
 
-        # Configurações do gráfico
-        ax.set_title(f'Distribuição por Grupo - {nome_modelo}')
+        # Aplicar eixo Y padronizado
+        # Deixar 10% de margem para melhor visualização
+        ax.set_ylim(0, max_y * 1.1)
+
+        ax.set_title(f'Distribuição por Grupo - {nome_graficos[grafico_id]}')
         ax.set_xlabel(f'Grupo ({num_divisoes} divisões)')
         ax.set_ylabel('Taxa de Mau (%)')
-        ax.set_xticks(indices)
-        ax.set_xticklabels(indices + 1)
+        ax.set_xticks(indices_padrao)
+        ax.set_xticklabels(indices_padrao + 1)
         ax.legend()
         ax.grid(axis="y", linestyle="--", alpha=0.7)
 
-    # Exibir gráficos
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_comparacao_lift(bases_nomeadas: dict, nome_graficos: dict, n_bins: int = 10) -> None:
+    """
+    Gera gráficos da Curva Lift para múltiplos modelos.
+
+    Parâmetros:
+    - bases_nomeadas (dict): Dicionário onde a chave é o nome da base, 
+      e o valor é uma lista contendo [DataFrame, número do gráfico].
+    - nome_graficos (dict): Dicionário onde a chave é o número do gráfico 
+      e o valor é o nome do modelo correspondente.
+    - n_bins (int): Número de bins (percentis) para dividir os scores.
+
+    Retorno:
+    - None. A função exibe os gráficos dinamicamente conforme a necessidade.
+    """
+
+    def calcular_lift(y_true, scores, n_bins):
+        """Calcula a Curva Lift agrupando os scores em percentis categóricos."""
+        df = pd.DataFrame({"y": y_true, "score": scores})
+
+        # Criar bins categóricos
+        df["bin"] = pd.qcut(df["score"], q=n_bins, labels=[
+                            f"{i+1}" for i in range(n_bins)], duplicates="drop")
+
+        # Calcular a taxa de resposta por bin
+        lift_df = df.groupby("bin").agg(
+            total=("y", "count"),
+            positivos=("y", "sum")
+        ).reset_index()
+
+        # Calcular a taxa de resposta acumulada
+        lift_df["taxa_positivos"] = lift_df["positivos"] / lift_df["total"]
+        taxa_media_positivos = df["y"].mean()
+
+        # Calcular Lift
+        lift_df["lift"] = lift_df["taxa_positivos"] / taxa_media_positivos
+
+        return lift_df["bin"], lift_df["lift"]
+
+    # Organizar os dataframes por gráficos
+    graficos_dict = {}
+    for nome, (df, num_grafico) in bases_nomeadas.items():
+        if num_grafico not in graficos_dict:
+            graficos_dict[num_grafico] = []
+        graficos_dict[num_grafico].append((nome, df))
+
+    num_graficos = len(graficos_dict)
+
+    # Definir layout de gráficos dinâmico
+    cols = min(num_graficos, 4)
+    rows = math.ceil(num_graficos / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
+    if num_graficos == 1:
+        axes = [axes]  # Garantir que seja iterável mesmo com 1 gráfico
+    elif rows == 1:
+        axes = axes.reshape(1, -1)  # Ajuste para uma única linha
+
+    axes = axes.flatten()  # Converter matriz para lista iterável
+
+    # Definir cores fixas para manter a consistência
+    cores_fixas = {
+        "Treino": "blue",
+        "Teste": "red",
+        "OOT": "green"
+    }
+
+    # Criar os gráficos
+    for idx, (num_grafico, bases) in enumerate(graficos_dict.items()):
+        ax = axes[idx]
+        titulo = nome_graficos.get(num_grafico, f"Gráfico {num_grafico}")
+
+        for nome_base, df in bases:
+            y = df["y"]
+            scores = df["score_1"]
+
+            bins, lift = calcular_lift(y, scores, n_bins)
+
+            # Identificar se é treino, teste ou OOT pelo nome
+            cor = cores_fixas["Treino"] if "Train" in nome_base else (
+                cores_fixas["Teste"] if "Test" in nome_base else cores_fixas["OOT"]
+            )
+
+            ax.plot(bins, lift, marker='o', linestyle='-',
+                    label=f'{nome_base}', color=cor)
+
+        ax.axhline(y=1, color="black", linestyle="--",
+                   label="Baseline (Aleatório)")
+        ax.set_title(f'Curva Lift - {titulo}')
+        ax.set_xlabel('Bin')
+        ax.set_ylabel('Lift')
+        ax.legend()
+        ax.grid(True)
+
+        # Ajustar eixo X para ser categórico
+        ax.set_xticks(range(n_bins))
+        ax.set_xticklabels(bins, rotation=45)
+
+    # Esconder gráficos vazios caso não sejam múltiplos perfeitos
+    for j in range(idx + 1, len(axes)):
+        fig.delaxes(axes[j])
+
     plt.tight_layout()
     plt.show()
 
@@ -1785,3 +1671,169 @@ def escorar_modelo(base_treino: pd.DataFrame, base_dados_escorar: pd.DataFrame, 
 
     # 4. Retornar a base original com a nova coluna de previsão
     return resultado
+
+
+def plot_matriz_confusao(dataframes_dict, limiar=0.5, perc=False):
+    """
+    Plota as matrizes de confusão de cada dataframe fornecido no dicionário de entrada.
+
+    Parâmetros:
+    - dataframes_dict (dict): Dicionário contendo nomes como chave e DataFrame como valor.
+    - limiar (float): Valor de corte para classificar score_1 como positivo.
+    - perc (bool): Se True, exibe os valores da matriz de confusão em percentual.
+
+    Retorna:
+    - Exibe os gráficos das matrizes de confusão.
+    """
+    num_graphs = len(dataframes_dict)
+    max_cols = 4  # Máximo de gráficos por linha
+    # Calcula quantas linhas são necessárias
+    rows = math.ceil(num_graphs / max_cols)
+
+    fig, axes = plt.subplots(rows, min(max_cols, num_graphs), figsize=(
+        5 * min(max_cols, num_graphs), 5 * rows))
+
+    if rows == 1:
+        axes = np.array([axes]) if num_graphs == 1 else np.array(
+            axes).reshape(1, -1)
+
+    axes = axes.flatten()  # Transformando em vetor para iteração
+
+    color_palette = "coolwarm"  # Define a paleta de cores fixa para todos os gráficos
+
+    for idx, (name, df) in enumerate(dataframes_dict.items()):
+        y_true = df['y']
+        y_pred = (df['score_1'] >= limiar).astype(
+            int)  # Classificação com base no limiar
+
+        cm = confusion_matrix(y_true, y_pred)
+
+        if perc:
+            cm = cm.astype('float') / cm.sum() * \
+                100  # Converte para percentual
+
+        ax = axes[idx]
+        sns.heatmap(cm, annot=True, fmt=".1f" if perc else "d",
+                    cmap=color_palette, cbar=False, ax=ax)
+        ax.set_title(f'Matriz de Confusão - {name}')
+        ax.set_xlabel('Predito')
+        ax.set_ylabel('Real')
+
+    # Remove gráficos extras se houver menos de 4*N
+    for j in range(idx + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    plt.show()
+
+
+def calcular_ks_por_safra(base_escorada: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula o valor máximo da estatística KS (Kolmogorov-Smirnov) para cada safra em um DataFrame.
+
+    Parâmetros:
+    base_escorada (pd.DataFrame): DataFrame contendo as colunas ['id', 'safra', 'y', 'score_1', 'score_0'].
+
+    Retorna:
+    pd.DataFrame: DataFrame com as colunas ['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'].
+    """
+
+    def calcular_ks(df: pd.DataFrame) -> Tuple[float, float]:
+        """
+        Calcula o KS máximo de um DataFrame contendo colunas:
+        ['id', 'safra', 'y', 'score_1', 'score_0'].
+
+        Retorna o KS máximo (em percentual) e o ponto onde ele ocorre.
+        """
+        df = df.sort_values(
+            by='score_1', ascending=False)  # Ordena pelo score_1 em ordem decrescente
+
+        total_eventos = df['y'].sum()
+        total_nao_eventos = (df['y'] == 0).sum()
+
+        # Evita divisão por zero
+        if total_eventos == 0 or total_nao_eventos == 0:
+            return 0.0, np.nan
+
+        df['acumulado_eventos'] = df['y'].cumsum() / total_eventos
+        df['acumulado_nao_eventos'] = (
+            (df['y'] == 0).cumsum()) / total_nao_eventos
+
+        df['diferença'] = abs(df['acumulado_eventos'] -
+                              df['acumulado_nao_eventos'])
+
+        ks_max = df['diferença'].max() * 100  # Convertendo KS para percentual
+
+        # Garantindo que ponto_ks seja um único valor
+        ponto_ks = df.loc[df['diferença'] == df['diferença'].max(), 'score_1']
+        ponto_ks = ponto_ks.iloc[0] if not np.isscalar(ponto_ks) else ponto_ks
+
+        return ks_max, ponto_ks
+
+    resultados = []
+
+    for safra, grupo in base_escorada.groupby('safra', observed=True):
+        ks_max, ponto_ks = calcular_ks(grupo)
+        resultados.append([safra, len(grupo), ks_max, ponto_ks])
+
+    tabela_resultados = pd.DataFrame(
+        resultados, columns=['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'])
+
+    # Garantir que a safra seja ordenada corretamente como categoria
+    tabela_resultados['safra'] = pd.Categorical(
+        tabela_resultados['safra'], ordered=True)
+    tabela_resultados = tabela_resultados.sort_values(by='safra')
+
+    return tabela_resultados
+
+
+def calcular_ks_para_multiplas_bases(bases_nomeadas: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """
+    Calcula a estatística KS por safra para múltiplas bases de dados e as concatena em um único DataFrame.
+
+    Parâmetros:
+    bases_nomeadas (Dict[str, pd.DataFrame]): Dicionário contendo nomes das bases como chave e DataFrames como valores.
+
+    Retorna:
+    pd.DataFrame: DataFrame consolidado com colunas ['Base', 'safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks'].
+    """
+    resultados_finais = []
+
+    for nome_base, df in bases_nomeadas.items():
+        df_resultado = calcular_ks_por_safra(df)  # Calcula KS por safra
+        df_resultado['Base'] = nome_base  # Adiciona a coluna de identificação
+        resultados_finais.append(df_resultado)  # Armazena o resultado
+
+    # Concatena os resultados em um único DataFrame
+    df_consolidado = pd.concat(resultados_finais, ignore_index=True)
+
+    return df_consolidado
+
+
+def plotar_ks_safra(tabela_resultados: pd.DataFrame) -> None:
+    """
+    Gera um gráfico de linhas mostrando a evolução do KS máximo por safra,
+    separando as linhas por categoria da base.
+
+    Parâmetros:
+    tabela_resultados (pd.DataFrame): DataFrame com as colunas ['safra', 'contagem_de_linhas', 'ks_max', 'ponto_ks', 'Base'].
+    """
+    plt.figure(figsize=(13, 5))
+
+    # Identificar categorias únicas da coluna 'Base'
+    categorias_base = tabela_resultados['Base'].unique()
+
+    # Criar gráfico de linhas para cada categoria da base
+    for categoria in categorias_base:
+        subset = tabela_resultados[tabela_resultados['Base'] == categoria]
+        plt.plot(subset['safra'].astype(str), subset['ks_max'],
+                 marker='o', label=f'Base: {categoria}')
+
+    # Configurações do gráfico
+    plt.xlabel('Safra')
+    plt.ylabel('KS Máximo (%)')
+    plt.ylim(0, 100)  # Garantindo que o eixo do KS vá de 0 a 100
+    plt.title('Evolução do KS Máximo por Safra')
+    plt.legend()
+    plt.grid(True)
+    plt.show()

@@ -9,5 +9,12 @@
 
 3 - pip install -r requirements.txt (instalar as bibliotecas)
 
+4 - Siga os templates comentados
+
+
+### Todas as funções estão documentadas em funcoes.py ##
+
+
+
 
 
