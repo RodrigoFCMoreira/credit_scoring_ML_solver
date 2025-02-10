@@ -1,3 +1,8 @@
+#Baixar ou clonar Todos os arquivos desse repositório 
+
+<> Code (botão verde) Download Zip
+
+ou git clone git@github.com:RodrigoFCMoreira/credit_scoring_ML_solver.git
 
 0 - baixar e instalar o Python 3.11.9 https://www.python.org/downloads/release/python-3119/ (Windows installer (64-bit))
 
