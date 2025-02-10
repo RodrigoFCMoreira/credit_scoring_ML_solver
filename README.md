@@ -18,3 +18,5 @@ ou git clone git@github.com:RodrigoFCMoreira/credit_scoring_ML_solver.git
 
 
 ### Todas as funções estão documentadas em funcoes.py ##
+
+PPT de apresentação -> https://docs.google.com/presentation/d/1dnBj4wyEHZKXzpW9dy3yTBJ5eeHRZyTgGXqXtyeHsSE/edit#slide=id.gc6f980f91_0_105
