@@ -34,6 +34,7 @@ from sklearn.metrics import (
 from optbinning import OptimalBinning
 from sklearn.cluster import KMeans
 from pycaret.classification import load_model, predict_model
+from scipy.spatial.distance import pdist, squareform
 
 
 def perfil_base(base_modelo: pd.DataFrame, id_col: str, target_col: str, safra_col: str) -> dict:
@@ -296,22 +297,25 @@ def aplicar_imputacao_treino(df: pd.DataFrame, regra_imputacao: Dict[str, str]) 
 
     """
 
+    # Criando uma cópia do DataFrame para evitar modificações no original
+    df_copy = df.copy()
+
     # Calcula os valores de mediana e média de cada coluna
-    dict_mediana: Dict[str, float] = df.median().to_dict()
-    dict_media: Dict[str, float] = df.mean().to_dict()
+    dict_mediana: Dict[str, float] = df_copy.median().to_dict()
+    dict_media: Dict[str, float] = df_copy.mean().to_dict()
 
     # Itera sobre as colunas do DataFrame e aplica a imputação conforme a regra especificada
-    for col in df.columns:
+    for col in df_copy.columns:
         if col in regra_imputacao:
             if regra_imputacao[col] == 'median':
-                df[col] = df[col].fillna(dict_mediana[col])
+                df_copy[col] = df_copy[col].fillna(dict_mediana[col])
             elif regra_imputacao[col] == 'mean':
-                df[col] = df[col].fillna(dict_media[col])
+                df_copy[col] = df_copy[col].fillna(dict_media[col])
         else:
             print(
                 f"A regra de imputação para a coluna '{col}' não foi especificada.")
 
-    return df, regra_imputacao, dict_mediana, dict_media
+    return df_copy, regra_imputacao, dict_mediana, dict_media
 
 
 def aplicar_imputacao_teste(df: pd.DataFrame,
@@ -447,36 +451,59 @@ def resumo_estatistico(df: pd.DataFrame) -> None:
         print("\n📌 Resumo Estatístico das Variáveis Categóricas:")
         display(df_categoric.describe())
 
+    return df_numeric.describe()
 
-def grafico_percentual_valores_ausentes(df: pd.DataFrame) -> None:
+
+def grafico_percentual_valores_ausentes(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Plota um gráfico de barras com o percentual de valores ausentes por variável.
+    Plota um gráfico de barras com o percentual de valores ausentes por variável
+    e retorna uma tabela com a volumetria, total de nulos e percentual de nulos.
 
     Parâmetros:
     df (pd.DataFrame): DataFrame contendo os dados.
+
+    Retorna:
+    pd.DataFrame: Tabela contendo as variáveis, volumetria, total de nulos e percentual de nulos.
     """
-    percentual_missing = (df.isnull().sum() / len(df)) * 100
-    percentual_missing = percentual_missing[percentual_missing > 0].sort_values(
-        ascending=False)
+    # Cálculo dos valores ausentes
+    total_nulos = df.isnull().sum()
+    volumetria = len(df)
+    perc_nulos = (total_nulos / volumetria) * 100
 
-    if percentual_missing.empty:
+    # Criando DataFrame com as métricas
+    tabela_nulos = pd.DataFrame({
+        "Variável": df.columns,
+        "Volumetria": volumetria,
+        "Total nulos": total_nulos,
+        "perc_nulos": perc_nulos
+    })
+
+    # Filtrando apenas as variáveis que possuem valores ausentes
+    tabela_nulos = tabela_nulos[tabela_nulos["Total nulos"] > 0].sort_values(
+        "perc_nulos", ascending=False)
+
+    # Se não houver valores ausentes, retorna a mensagem e a tabela vazia
+    if tabela_nulos.empty:
         print("✅ Nenhuma variável possui valores ausentes.")
-        return
+        return tabela_nulos
 
+    # Plotando o gráfico
     plt.figure(figsize=(10, 5))
-    sns.barplot(x=percentual_missing.index,
-                y=percentual_missing.values, palette="viridis")
+    sns.barplot(x=tabela_nulos["Variável"],
+                y=tabela_nulos["perc_nulos"], palette="viridis")
     plt.xticks(rotation=45, ha="right")
     plt.ylabel("Percentual de valores ausentes (%)")
     plt.xlabel("Variáveis")
     plt.title("Percentual de Valores Ausentes por Variável")
 
     # Exibir os valores acima das barras
-    for index, value in enumerate(percentual_missing):
-        plt.text(index, value, f"{value:.0f}%",
+    for index, value in enumerate(tabela_nulos["perc_nulos"]):
+        plt.text(index, value, f"{value:.1f}%",
                  ha="center", va="bottom", fontsize=8)
 
     plt.show()
+
+    return tabela_nulos
 
 
 def matriz_correlacao(df: pd.DataFrame) -> None:
@@ -1903,4 +1930,61 @@ def plot_psi(train_df, test_df, variavel, bins=10):
     # Exibir gráfico
     plt.show()
 
-    #
+
+def distance_correlation(x, y):
+    """Calcula a Distância Correlacional (dCor) entre duas variáveis x e y."""
+    x, y = np.asarray(x), np.asarray(y)
+
+    def distance_matrix(a):
+        return squareform(pdist(a[:, None], metric='euclidean'))
+
+    def centering_matrix(d):
+        n = d.shape[0]
+        row_mean = d.mean(axis=1, keepdims=True)
+        col_mean = d.mean(axis=0, keepdims=True)
+        total_mean = d.mean()
+        return d - row_mean - col_mean + total_mean
+
+    A, B = centering_matrix(distance_matrix(
+        x)), centering_matrix(distance_matrix(y))
+
+    dCovXY = np.sqrt(np.mean(A * B))
+    dVarX = np.sqrt(np.mean(A * A))
+    dVarY = np.sqrt(np.mean(B * B))
+
+    return dCovXY / np.sqrt(dVarX * dVarY) if dVarX > 0 and dVarY > 0 else 0
+
+
+def distance_correlation_matrix(df):
+    """
+    Calcula a matriz de Distância Correlacional (dCor) para todas as variáveis de um DataFrame
+    e plota um heatmap.
+
+    Parâmetros:
+        df (pd.DataFrame): DataFrame contendo as variáveis numéricas.
+
+    Retorna:
+        pd.DataFrame: Matriz de distância correlacional.
+    """
+    cols = df.columns
+    n = len(cols)
+    dcor_matrix = np.zeros((n, n))
+
+    # Calcula a distância correlacional para cada par de variáveis
+    for i in range(n):
+        for j in range(n):
+            if i <= j:  # Evita cálculos redundantes
+                dcor_matrix[i, j] = distance_correlation(
+                    df[cols[i]], df[cols[j]])
+                dcor_matrix[j, i] = dcor_matrix[i, j]  # Matriz simétrica
+
+    dcor_df = pd.DataFrame(dcor_matrix, index=cols, columns=cols)
+
+    # Plotando o heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(dcor_df, annot=True, cmap="coolwarm",
+                fmt=".2f", linewidths=0.5)
+    plt.title("Heatmap de Distância Correlacional (dCor)")
+    plt.show()
+
+    return dcor_df
